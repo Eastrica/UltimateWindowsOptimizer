@@ -45,8 +45,7 @@
 *Альтернативный запуск через консоль:*
 Откройте PowerShell от имени Администратора и введите:
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force
-.\EastricaUltimateWindowsOptimizer.ps1
+Set-ExecutionPolicy Bypass -Scope Process -Force .\EastricaUltimateWindowsOptimizer.ps1
 ```
 
 ### 🛡 Безопасность и Удаление (Откат изменений)
@@ -102,8 +101,7 @@ Unlike many "optimizers" that blindly delete system files and break Windows, thi
 *Alternative Console Method:*
 Open PowerShell as Administrator and run:
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force
-.\EastricaUltimateWindowsOptimizer.ps1
+Set-ExecutionPolicy Bypass -Scope Process -Force .\EastricaUltimateWindowsOptimizer.ps1
 ```
 
 ### 🛡 Safety & Uninstallation (Rollback)
@@ -125,5 +123,5 @@ Your system's stability is our priority. On the first run, the script automatica
 This project is licensed under the **[MIT License](LICENSE)**. 
 *Use at your own risk. The author is not responsible for any system damage.*
 
-Этот проект распространяется под лицензией **MIT License**. 
+Этот проект распространяется под лицензией **[MIT License](LICENSE)**. 
 *Используйте на свой страх и риск. Автор не несет ответственности за возможные неполадки в работе ОС.*
