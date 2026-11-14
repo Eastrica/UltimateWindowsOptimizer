@@ -420,7 +420,7 @@ public static class EastricaMaintenanceNative {
 # Авто-обновление скрипта (Eastrica Ultimate Windows Optimizer)
 # ==============================================================================
 # Замените ссылки на ваш реальный репозитории GitHub
-$CurrentVersion = "1.0.1" 
+$CurrentVersion = "1.0.2"
 $VersionUrl = "https://raw.githubusercontent.com/Eastrica/UltimateWindowsOptimizer/main/version.txt"
 $ScriptUrl = "https://raw.githubusercontent.com/Eastrica/UltimateWindowsOptimizer/main/EastricaUltimateWindowsOptimizer.ps1"
 
@@ -2984,11 +2984,11 @@ Apply-Tweak "Максимальная агрессивность удержан�
 # 7d24baa7-0b84-480f-840c-1b0743c00f5f = Processor performance history count (1 интервал: принятие решения о бусте за 1 тик без инерции усреднения)
 Apply-Tweak "Отключение инерции усреднения нагрузки CPU (History Count = 1)" { Set-SafeCpuPower "7d24baa7-0b84-480f-840c-1b0743c00f5f" 1 1 }
 
-# 4d2b0152-7d5c-498b-88e2-34345392a2c5 = реакция планировщика на прерывания
+# 4d2b0152-7d5c-498b-88e2-34345392a2c5 = интервал проверки производительности процессора (5000мс снижает фоновые DPC-прерывания)
 if ($global:IsLaptop) {
-    Apply-Tweak "Установка интервала проверки процессора (10мс для ноутбука)" { Set-SafeCpuPower "4d2b0152-7d5c-498b-88e2-34345392a2c5" 10 10 } # Для ноутбуков задаем балансный интервал (10 мс)
+    Apply-Tweak "Установка интервала проверки процессора (15мс для ноутбука)" { Set-SafeCpuPower "4d2b0152-7d5c-498b-88e2-34345392a2c5" 15 15 }
 } else {
-    Apply-Tweak "Установка интервала проверки процессора (1мс для ПК)" { Set-SafeCpuPower "4d2b0152-7d5c-498b-88e2-34345392a2c5" 1 1 } # Для ПК ставим абсолютный минимум (1 мс). Значение 0 недопустимо ядром ОС!
+    Apply-Tweak "Оптимизация интервала проверки процессора (5000мс для снижения DPC)" { Set-SafeCpuPower "4d2b0152-7d5c-498b-88e2-34345392a2c5" 5000 5000 }
 }
 
 # Восстанавливаем способность ядер засыпать (Critical for AMD PBO & Intel TurboBoost)
@@ -3150,9 +3150,9 @@ Apply-Tweak "Глобальное отключение Energy Saver" { Set-ItemP
 $SmPower = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power"
 if (!(Test-Path $SmPower)) { Apply-Tweak "Создание раздела Session Manager\Power" { New-Item -Path $SmPower -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 
-Apply-Tweak "Отключение склеивания системных таймеров ядра (CoalescingTimerInterval = 0)" {
-    Set-ItemProperty -Path $SmPower -Name "CoalescingTimerInterval" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-    Set-ItemProperty -Path $SmPower -Name "CoalescingFlushInterval" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+Apply-Tweak "Возврат группировки фоновых таймеров ОС (CoalescingTimerInterval)" {
+    Remove-ItemProperty -Path $SmPower -Name "CoalescingTimerInterval" -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    Remove-ItemProperty -Path $SmPower -Name "CoalescingFlushInterval" -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
 }
 Apply-Tweak "Дублирование DeepIoCoalescingEnabled и DisableVsyncLatencyUpdate в Session Manager\Power" {
     Set-ItemProperty -Path $SmPower -Name "DeepIoCoalescingEnabled" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
@@ -5198,12 +5198,12 @@ if ($Adapters) {
             Apply-Tweak "Удаление старого ключа AntiLagEnable" { Remove-ItemProperty -LiteralPath $RegPath -Name "KMD_EnableAntiLag" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удалить старый твик
             Apply-Tweak "Удаление Anti-Lag 2 (NextGen)" { Remove-ItemProperty -LiteralPath $RegPath -Name "KMD_AntiLagNextGen" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удалить старый твик
 
-            # Экстремальный кэш шейдеров AMD
+            # Экстремальный кэш шейдеров AMD (драйвер хранит параметры UMD строго в REG_BINARY UTF-16LE: 32 00 = "2" Always On)
             $UmdPath = "$RegPath\UMD"
-            if (!(Test-Path -Path $UmdPath)) { Apply-Tweak "Создание папки UMD" { New-Item -Path $UmdPath -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } } # Создаем подпапку UMD
-            Apply-Tweak "Включение Shader Cache (AMD)" { Set-ItemProperty -LiteralPath $UmdPath -Name "ShaderCache" -Value "1" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Включаем Shader Cache
-            Apply-Tweak "Снятие лимита кэша шейдеров" { Remove-ItemProperty -LiteralPath $UmdPath -Name "ShaderCacheLimit" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем лимит кэша (Драйвер будет использовать 10GB системы)
-            Apply-Tweak "Сохранение кэша шейдеров на диске" { Set-ItemProperty -LiteralPath $UmdPath -Name "ShaderCacheStorageMode" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Включаем хранение на диске
+            if (!(Test-Path -Path $UmdPath)) { Apply-Tweak "Создание папки UMD" { New-Item -Path $UmdPath -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
+            Apply-Tweak "Включение Shader Cache (AMD UMD Binary)" { Set-ItemProperty -LiteralPath $UmdPath -Name "ShaderCache" -Value ([byte[]](0x32,0x00)) -Type Binary -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            Apply-Tweak "Снятие лимита кэша шейдеров" { Remove-ItemProperty -LiteralPath $UmdPath -Name "ShaderCacheLimit" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            Apply-Tweak "Сохранение кэша шейдеров на диске" { Set-ItemProperty -LiteralPath $UmdPath -Name "ShaderCacheStorageMode" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
             # Восстановление сна памяти AMD (Снижение энергопотребления видеокарты в простое)
             Apply-Tweak "Разрешение снижения частот VRAM видеокарт AMD в простое" { 
@@ -5212,10 +5212,13 @@ if ($Adapters) {
                 Remove-ItemProperty -LiteralPath $RegPath -Name "PP_SclkDeepSleepDisable" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
             }
 
-            # Принудительная очередь кадров (Flip Queue Size = 1)
-            Apply-Tweak "Очередь кадров = 1 (FlipQueueSize)" { Set-ItemProperty -LiteralPath $RegPath -Name "FlipQueueSize" -Value "1" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            Apply-Tweak "Очередь кадров 3D = 1" { Set-ItemProperty -LiteralPath $RegPath -Name "Main3D_FlipQueueSize" -Value "1" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            Apply-Tweak "Очередь кадров 3D DEF = 1" { Set-ItemProperty -LiteralPath $RegPath -Name "Main3D_DEF_FlipQueueSize" -Value "1" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            # Принудительная очередь кадров (Flip Queue Size = 1 в формате REG_BINARY внутри UMD и очистка ошибочных строк)
+            Apply-Tweak "Очистка невалидных строковых ключей FlipQueueSize из корня адаптера" {
+                Remove-ItemProperty -LiteralPath $RegPath -Name "FlipQueueSize" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                Remove-ItemProperty -LiteralPath $RegPath -Name "Main3D_FlipQueueSize" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                Remove-ItemProperty -LiteralPath $RegPath -Name "Main3D_DEF_FlipQueueSize" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+            }
+            Apply-Tweak "Очередь кадров = 1 (AMD UMD FlipQueueSize Binary)" { Set-ItemProperty -LiteralPath $UmdPath -Name "FlipQueueSize" -Value ([byte[]](0x31,0x00)) -Type Binary -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
             # Убийство скрытых статтеров текстур
             Apply-Tweak "Наивысшее качество текстур (TextureLod = 0)" { Set-ItemProperty -LiteralPath $RegPath -Name "TextureLod" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Наивысшее качество
@@ -7745,7 +7748,7 @@ if ($SteamPath) {
             Write-Host " ► Сканирование библиотеки Steam (GPU Prefs & NPI Profile): $Folder" -ForegroundColor DarkGray
             $ExeFiles = Get-ChildItem -Path $Folder -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue | Where-Object { 
                 $_.Length -gt 1MB -and 
-                $_.Name -notmatch "Crash|Uninst|Setup|Launcher|WebHelper|redist|vcredist|vc_redist|NDP|dotnet|directx|dxwebsetup|helper|tool|patch|install|update|eac|battleye|beservice|Report|Feedback" 
+                $_.Name -notmatch "Crash|Uninst|Setup|Launcher|WebHelper|redist|vcredist|vc_redist|NDP|dotnet|directx|dxwebsetup|helper|tool|patch|install|update|eac|battleye|beservice|Report|Feedback|wallpaper|ui32|lossless|soundpad|sharex|crosshair|overlay|tray|service|daemon|agent|server|console" 
             }
             foreach ($Exe in $ExeFiles) {
                 Apply-Tweak "Очистка старых настроек GPU для $($Exe.Name)" { Remove-ItemProperty -Path $GpuPrefs -Name $Exe.FullName -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
@@ -8271,7 +8274,7 @@ Apply-Tweak "Отключение DbgPrintOn для UMDF Diagnostics" { Set-Item
 $KernelPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" # Путь к настройкам ядра
 if (!(Test-Path $KernelPath)) { Apply-Tweak "Создание раздела Session Manager\kernel" { New-Item -Path $KernelPath -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } } # Создаем раздел
 Apply-Tweak "Включение независимого расчета тиков для каждого ядра" { Set-ItemProperty -Path $KernelPath -Name "EnablePerCpuClockTickScheduling" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Включение независимого расчета тиков для каждого ядра
-Apply-Tweak "Глобальные запросы разрешения системного таймера" { Set-ItemProperty -Path $KernelPath -Name "GlobalTimerResolutionRequests" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Глобальные запросы разрешения системного таймера
+Apply-Tweak "Изоляция фоновых запросов разрешения таймера (GlobalTimerResolutionRequests = 0)" { Set-ItemProperty -Path $KernelPath -Name "GlobalTimerResolutionRequests" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Понижает нагрев процессора
 if ($global:IsLaptop) {
     Apply-Tweak "Привязка истечения системных таймеров к Core 0 (SerializeTimerExpiration = 0)" { Set-ItemProperty -Path $KernelPath -Name "SerializeTimerExpiration" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 } else {
@@ -15640,15 +15643,31 @@ $ExeStrings    </Executeables>
             }
         }
     
-        # Настройка оптимизированного профиля Process Lasso (probalance.ini)
-        Apply-Tweak "Настройка профиля Process Lasso (probalance.ini)" {
+        # Настройка оптимизированного профиля Process Lasso (официальный формат prolasso.ini в UTF-16LE без ProBalance/IdleSaver)
+        Apply-Tweak "Настройка профиля Process Lasso (prolasso.ini)" {
             Get-Process -Name "ProcessLasso", "processgovernor" -ErrorAction SilentlyContinue | Stop-Process -Force
             Start-Sleep -Seconds 1
-            $lassoDir = "$env:APPDATA\ProcessLasso"
-            if (-not (Test-Path $lassoDir)) { New-Item -Path $lassoDir -ItemType Directory -Force | Out-Null }
+            $lassoConfigDir = "$env:APPDATA\ProcessLasso\config"
+            if (-not (Test-Path $lassoConfigDir)) { New-Item -Path $lassoConfigDir -ItemType Directory -Force | Out-Null }
             $GameRuleList = if ($global:NvGameExes -and $global:NvGameExes.Count -gt 0) { ($global:NvGameExes | Select-Object -Unique) -join "," } else { "" }
-            $probalanceConfig = "[ProBalance]`r`nEnabled=1`r`nIgnoreForegroundProcesses=1`r`nIgnoreChildrenOf=steam.exe,epicgameslauncher.exe,vgc.exe,battlenet.exe`r`nProBalanceExclusions=audiodg.exe,dwm.exe,obs64.exe,vrserver.exe,vgc.exe,vgtray.exe,faceit.exe,faceitclient.exe,EasyAntiCheat.exe,EasyAntiCheat_EOS.exe,beservice.exe,rtss.exe`r`nProBalanceExcludeGames=1`r`nSmartIO=1`r`nHideTrayIcon=0`r`nProBalanceExcludeChildren=1`r`nProBalanceExcludeForeground=1`r`n`r`n[PerformanceModeProcesses]`r`n$GameRuleList"
-            Set-Content -Path "$lassoDir\prolasso.ini" -Value $probalanceConfig -Encoding UTF8 -Force
+            $probalanceConfig = @"
+[OutOfControlProcessRestraint]
+OocOn=false
+ExcludeChildrenOfForeground=true
+ExcludeServices=true
+OocExclusions=audiodg.exe,dwm.exe,obs64.exe,vrserver.exe,vgc.exe,vgtray.exe,faceit.exe,faceitclient.exe,EasyAntiCheat.exe,EasyAntiCheat_EOS.exe,beservice.exe,rtss.exe
+
+[GamingMode]
+GamingModeEnabled=false
+GamingChangePowerPlan=false
+GamingModeEngageForSteam=false
+AutomaticGamingModeProcessPaths=$GameRuleList
+
+[PowerSaver]
+EnergySaverEnabled=false
+"@
+            Set-Content -Path "$lassoConfigDir\prolasso.ini" -Value $probalanceConfig -Encoding Unicode -Force
+            Set-Content -Path "$env:APPDATA\ProcessLasso\prolasso.ini" -Value $probalanceConfig -Encoding Unicode -Force
         }
         Write-Host "[OK] Process Lasso успешно настроен." -ForegroundColor DarkGray
 
