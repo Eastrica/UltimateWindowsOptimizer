@@ -420,7 +420,7 @@ public static class EastricaMaintenanceNative {
 # Авто-обновление скрипта (Eastrica Ultimate Windows Optimizer)
 # ==============================================================================
 # Замените ссылки на ваш реальный репозитории GitHub
-$CurrentVersion = "1.0.2"
+$CurrentVersion = "1.0.3"
 $VersionUrl = "https://raw.githubusercontent.com/Eastrica/UltimateWindowsOptimizer/main/version.txt"
 $ScriptUrl = "https://raw.githubusercontent.com/Eastrica/UltimateWindowsOptimizer/main/EastricaUltimateWindowsOptimizer.ps1"
 
@@ -3267,6 +3267,7 @@ if (-not $global:OptAntiCheat) {
 } else {
     # В режиме античита оставляем CET включенным (FACEIT/Vanguard требуют его для целостности памяти)
     Apply-Tweak "Удаление ограничения CET для совместимости с античитами" { Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" -Name "CetAppCompatState" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    try { Apply-Tweak "Восстановление теневого стека (UserShadowStack)" { Set-ProcessMitigation -System -Enable UserShadowStack *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } } catch { }
 }
 
 # Отключение программных заплаток Spectre/Meltdown
@@ -4334,9 +4335,9 @@ Write-Host "РАЗДЕЛ 14: МУЛЬТИМЕДИА, MMCSS И ИГРОВОЙ Р�
 Write-Host "==============================================================================" -ForegroundColor DarkGray
 
 $MMCSS = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" # Путь к мультимедийному профилю системы
-# 0 = 100% процессорного времени доступно для активных мультимедиа и игровых потоков (значение 3 не входит в сетку шагов планировщика)
-Apply-Tweak "Максимальный приоритет CPU для игр и мультимедиа (SystemResponsiveness = 0)" { 
-    Set-ItemProperty -Path $MMCSS -Name "SystemResponsiveness" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 
+# 10 = минимальное реальное значение в mmcss.sys (значение 0 система округляет обратно до 20; 20 = стандарт Windows)
+Apply-Tweak "Максимальный приоритет CPU для игр и мультимедиа (SystemResponsiveness = 10)" { 
+    Set-ItemProperty -Path $MMCSS -Name "SystemResponsiveness" -Value 10 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 
 }
 # -1 (0xFFFFFFFF) = Полное отключение троттлинга сетевых пакетов при активности мультимедиа
 Apply-Tweak "Отключение сетевого троттлинга MMCSS (NetworkThrottlingIndex = -1)" { Set-ItemProperty -Path $MMCSS -Name "NetworkThrottlingIndex" -Value -1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
@@ -4876,57 +4877,45 @@ if ($USBControllers) {
     }
 }
 
-# Жесткая изоляция прерываний звука (Zero Audio Latency)
+# Прямой откат изменений прерываний для PCI-звуковых карт и HDAudBus от предыдущего запуска
 $AudioControllers = Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Media'" -ErrorAction SilentlyContinue
 if ($AudioControllers) {
     foreach ($audio in $AudioControllers) {
         $PnpID = $audio.PNPDeviceID
         if ($PnpID -match "^PCI") {
             $ParentPath  = "HKLM:\SYSTEM\CurrentControlSet\Enum\$PnpID\Device Parameters"
-            $RegBase     = "$ParentPath\Interrupt Management"
-            $MsiKey      = "$RegBase\MessageSignaledInterruptProperties"
-            $AffinityKey = "$RegBase\Affinity Policy"
-            
-            Grant-RegPermission -RegPath $ParentPath
-            try {
-                if (!(Test-Path $MsiKey)) { Apply-Tweak "Создание ключа MSI для звуковой карты" { New-Item -Path $MsiKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-                if (!(Test-Path $AffinityKey)) { Apply-Tweak "Создание ключа Affinity для звуковой карты" { New-Item -Path $AffinityKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-                
-                # MSISupported = 1: устранение прерываний Line-based IRQ
-                Apply-Tweak "Включение MSI Mode для звука" { Set-ItemProperty -Path $MsiKey -Name "MSISupported" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                # DevicePriority = 3 (High): защита от искажений и хрипов звука при нагрузке на систему
-                Apply-Tweak "Высокий приоритет прерываний для звука" { Set-ItemProperty -Path $AffinityKey -Name "DevicePriority" -Value 3 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                # DevicePolicy = 5 (Spread): равномерное распределение аудиопотока по ядрам ЦП
-                Apply-Tweak "Размазывание очередей аудио по ядрам" { Set-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Value 5 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                Apply-Tweak "Удаление старой привязки звука" { Remove-ItemProperty -Path $AffinityKey -Name "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            } finally {
-                Restore-RegPermission -RegPath $ParentPath
+            $AffinityKey = "$ParentPath\Interrupt Management\Affinity Policy"
+            if (Test-Path $AffinityKey) {
+                Grant-RegPermission -RegPath $ParentPath
+                try {
+                    Apply-Tweak "Откат политики прерываний звука ($($audio.Name))" {
+                        Remove-ItemProperty -Path $AffinityKey -Name "DevicePriority" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                        Remove-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                        Remove-ItemProperty -Path $AffinityKey -Name "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                    }
+                } finally {
+                    Restore-RegPermission -RegPath $ParentPath
+                }
             }
         }
     }
 }
 
-# Включение MSI для системного хост-контроллера High Definition Audio (HDAudBus)
 $HdAudBusControllers = Get-CimInstance Win32_PnPEntity | Where-Object { $_.Service -eq 'HDAudBus' }
 if ($HdAudBusControllers) {
     foreach ($Controller in $HdAudBusControllers) {
         $PnpID = $Controller.PNPDeviceID
         $ParentPath  = "HKLM:\SYSTEM\CurrentControlSet\Enum\$PnpID\Device Parameters"
-        $RegBase     = "$ParentPath\Interrupt Management"
-        $MsiKey      = "$RegBase\MessageSignaledInterruptProperties"
-        $AffinityKey = "$RegBase\Affinity Policy"
-        
-        Grant-RegPermission -RegPath $ParentPath
-        try {
-            if (!(Test-Path $MsiKey)) { Apply-Tweak "Создание ключа MSI для HDAudBus" { New-Item -Path $MsiKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-            if (!(Test-Path $AffinityKey)) { Apply-Tweak "Создание ключа Affinity для HDAudBus" { New-Item -Path $AffinityKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-            
-            # MSISupported = 0 для моста HDAudBus (защита от BSOD и отвала звука при выключении/включении HDMI АВ-ресивера)
-            Apply-Tweak "Защита системной аудиошины HDAudBus от сбоев HDMI Hotplug (MSISupported = 0)" { Set-ItemProperty -Path $MsiKey -Name "MSISupported" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            # DevicePriority = 3: приоритет High системной аудиошины сохраняем!
-            Apply-Tweak "Высокий приоритет системной аудиошины" { Set-ItemProperty -Path $AffinityKey -Name "DevicePriority" -Value 3 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-        } finally {
-            Restore-RegPermission -RegPath $ParentPath
+        $AffinityKey = "$ParentPath\Interrupt Management\Affinity Policy"
+        if (Test-Path $AffinityKey) {
+            Grant-RegPermission -RegPath $ParentPath
+            try {
+                Apply-Tweak "Откат приоритета системной аудиошины HDAudBus" {
+                    Remove-ItemProperty -Path $AffinityKey -Name "DevicePriority" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                }
+            } finally {
+                Restore-RegPermission -RegPath $ParentPath
+            }
         }
     }
 }
@@ -5079,14 +5068,8 @@ if ($Adapters) {
             Apply-Tweak "Отключение Workstation Post Processing" { Set-ItemProperty -LiteralPath $RegPath -Name "0x11112256" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # WKS_POST_PROCESSING_ENGINE_CONTROL
             Apply-Tweak "Отключение Workstation Feature Support" { Set-ItemProperty -LiteralPath $RegPath -Name "0x11d9dc84" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # WKS_FEATURE_SUPPORT_CONTROL
 
-            # Управление HDCP: при активном AntiCheat или просмотре DRM-видео сохраняем значение 0
-            if ($global:OptAntiCheat) {
-                # DisableHDCP = 0: сохранение поддержки DRM-видео, Netflix, Кинопоиска и очков виртуальной реальности
-                Apply-Tweak "Сохранение поддержки HDCP (NVIDIA)" { Set-ItemProperty -LiteralPath $RegPath -Name "DisableHDCP" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            } else {
-                # DisableHDCP = 1: отключение защиты контента для снижения задержки сигнала дисплея в киберспорте
-                Apply-Tweak "Отключение HDCP защиты (NVIDIA - Киберспорт)" { Set-ItemProperty -LiteralPath $RegPath -Name "DisableHDCP" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            }
+            # Откат отключения HDCP от предыдущего запуска
+            Apply-Tweak "Удаление отключения HDCP (NVIDIA)" { Remove-ItemProperty -LiteralPath $RegPath -Name "DisableHDCP" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 			
             if (-not $global:IsLaptop) {
                 # Отключает внутренний ASPM L0s/L1 внутри Resource Manager драйвера nvlddmkm.sys на ПК
@@ -5225,14 +5208,8 @@ if ($Adapters) {
             Apply-Tweak "Отключение снижения качества текстур (TFQ)" { Set-ItemProperty -LiteralPath $RegPath -Name "TFQ" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Отключить снижение качества текстур
             Apply-Tweak "Оптимизация против статтеров (StutterMode = 0)" { Set-ItemProperty -LiteralPath $RegPath -Name "StutterMode" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Оптимизация против статтеров
             
-            # Управление HDCP для видеокарт AMD
-            if ($global:OptAntiCheat) {
-                # HDCPEnable = 1: сохранение проверки подлинности DRM-контента
-                Apply-Tweak "Сохранение поддержки HDCP (AMD)" { Set-ItemProperty -LiteralPath $RegPath -Name "HDCPEnable" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            } else {
-                # HDCPEnable = 0: отключение опроса протокола защиты для исключения задержек DisplayPort
-                Apply-Tweak "Отключение HDCP защиты (AMD - Киберспорт)" { Set-ItemProperty -LiteralPath $RegPath -Name "HDCPEnable" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            }
+            # Восстановление поддержки HDCP для видеокарт AMD
+            Apply-Tweak "Сохранение поддержки HDCP (AMD)" { Set-ItemProperty -LiteralPath $RegPath -Name "HDCPEnable" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
             
             Apply-Tweak "Возврат управления прерываниями графики ядру системы" { Remove-ItemProperty -LiteralPath $RegPath -Name "KMD_EnablePreemption" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удалить твик (Оставить ядру)
             Apply-Tweak "Возврат управления прерываниями вычислений ядру системы" { Remove-ItemProperty -LiteralPath $RegPath -Name "KMD_EnableComputePreemption" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удалить твик (Оставить ядру)
@@ -5321,12 +5298,8 @@ if ($Adapters) {
         # ==========================================
         elseif ($Provider -match "Intel" -or $Desc -match "Intel") {
             Write-Host " ► Обнаружена видеокарта Intel. Настройка реестра..." -ForegroundColor DarkGray
-            # Управление HDCP для встроенной графики Intel
-            if ($global:OptAntiCheat) {
-                Apply-Tweak "Сохранение поддержки HDCP (Intel)" { Set-ItemProperty -LiteralPath $RegPath -Name "DisableHDCP" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            } else {
-                Apply-Tweak "Отключение HDCP защиты (Intel - Киберспорт)" { Set-ItemProperty -LiteralPath $RegPath -Name "DisableHDCP" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            }
+            # Откат отключения HDCP для встроенной графики Intel
+            Apply-Tweak "Удаление отключения HDCP (Intel)" { Remove-ItemProperty -LiteralPath $RegPath -Name "DisableHDCP" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
             Apply-Tweak "Отключение Panel Self Refresh (Энергосбережение Intel)" { Set-ItemProperty -LiteralPath $RegPath -Name "FeatureTestControl" -Value 37458 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 37458 = Отключение энергосбережения Panel Self Refresh (PSR)
         }
         Apply-Tweak "Восстановление прав на класс видеокарты" { Restore-RegPermission -RegPath $RegPath } # Возвращаем права системе
@@ -6286,6 +6259,15 @@ if ($global:OptServices) {
             }
         }
     }
+} else {
+    $Volumes = Get-CimInstance -Class Win32_Volume -Filter "DriveType=3" -ErrorAction SilentlyContinue
+    if ($Volumes) {
+        foreach ($Vol in $Volumes) {
+            if ($Vol.IndexingEnabled -eq $false) {
+                Apply-Tweak "Включение индексирования на диске $($Vol.DriveLetter)" { Set-CimInstance -InputObject $Vol -Property @{IndexingEnabled = $true} *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            }
+        }
+    }
 }
 
 Write-Host ""
@@ -6635,17 +6617,18 @@ if ($Endpoints) {
     foreach ($EP in $Endpoints) {
         $PropPath = "$($EP.PSPath)\Properties" # Переходим в свойства конкретного устройства
         if (Test-Path $PropPath) {
+            $EpPropsCheck = Get-ItemProperty -LiteralPath $PropPath -ErrorAction SilentlyContinue
+            $EpTextCheck = if ($EpPropsCheck) { ($EpPropsCheck.PSObject.Properties.Value | Out-String) } else { "" }
+            $IsAvrOrHdmi = ($EpTextCheck -match "(?i)AVR|Receiver|Denon|Marantz|Onkyo|Yamaha|Pioneer|Sony|HDMI|DisplayPort|NVIDIA|AMD|Atmos|Theater")
+
             Apply-Tweak "Захват прав на свойства устройства $($EP.PSChildName)" { Grant-RegPermission -RegPath $PropPath } # Взламываем права на свойства
             
-            # В Windows 10/11 параметры монопольного режима в ветке MMDevices\...\Properties хранятся строго как REG_DWORD (1 = Вкл, 0 = Выкл)
-            if ($ExclusiveMode) {
-                # {b3f8fa53-0004-438e-9003-51a46e139bfc},3 = Разрешить приложениям использовать устройство в монопольном режиме (1 = Разрешено)
+            # Для HDMI/AVR принудительно снимаем монопольный режим (0) для совместимости с Dolby Atmos for Home Theater
+            if ($ExclusiveMode -and -not $IsAvrOrHdmi) {
                 Apply-Tweak "Разрешение монопольного режима для $($EP.PSChildName)" { Set-ItemProperty -LiteralPath $PropPath -Name "{b3f8fa53-0004-438e-9003-51a46e139bfc},3" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                # {b3f8fa53-0004-438e-9003-51a46e139bfc},4 = Предоставить приоритет приложениям в монопольном режиме (1 = Включено)
                 Apply-Tweak "Приоритет монопольного режима для $($EP.PSChildName)" { Set-ItemProperty -LiteralPath $PropPath -Name "{b3f8fa53-0004-438e-9003-51a46e139bfc},4" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
             } else {
-                # 0 = Отключаем монопольный захват, чтобы игра не глушила звук в Discord и OBS
-                Apply-Tweak "Снятие монопольного режима для $($EP.PSChildName) (Discord Fix)" { Set-ItemProperty -LiteralPath $PropPath -Name "{b3f8fa53-0004-438e-9003-51a46e139bfc},3" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                Apply-Tweak "Снятие монопольного режима для $($EP.PSChildName) (Atmos / Discord Fix)" { Set-ItemProperty -LiteralPath $PropPath -Name "{b3f8fa53-0004-438e-9003-51a46e139bfc},3" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
                 Apply-Tweak "Снятие приоритета монопольного режима для $($EP.PSChildName)" { Set-ItemProperty -LiteralPath $PropPath -Name "{b3f8fa53-0004-438e-9003-51a46e139bfc},4" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
             }
             
@@ -6654,21 +6637,22 @@ if ($Endpoints) {
     }
 }
 
-# Блокировка D3-сна для встроенного аудиоконтроллера видеокарты
-$GpuAudioDevices = Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Where-Object { $_.PNPDeviceID -match "^PCI" -and ($_.Manufacturer -match "NVIDIA" -or $_.Manufacturer -match "AMD") } # Ищем звук HDMI/DP от видеокарты
+# Прямой откат PowerMgmt встроенного аудиоконтроллера видеокарты от предыдущего запуска
+$GpuAudioDevices = Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Where-Object { $_.PNPDeviceID -match "^PCI" -and ($_.Manufacturer -match "NVIDIA" -or $_.Manufacturer -match "AMD") }
 if ($GpuAudioDevices) {
     foreach ($Dev in $GpuAudioDevices) {
-        $PnpID = $Dev.PNPDeviceID # Получаем PnP ID аудио-чипа на видеокарте
+        $PnpID = $Dev.PNPDeviceID
         $ParentPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$PnpID\Device Parameters"
-        $PowerKey = "$ParentPath\PowerMgmt" # Путь к управлению питанием
-        Grant-RegPermission -RegPath $ParentPath
-        try {
-            if (!(Test-Path $PowerKey)) { Apply-Tweak "Создание раздела PowerMgmt для аудио GPU" { New-Item -Path $PowerKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-            Apply-Tweak "Запрет сна аудио-чипа GPU (ConservationIdleTime)" { Set-ItemProperty -Path $PowerKey -Name "ConservationIdleTime" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Запрещаем аудио-чипу уходить в сон, делая шину видеокарты монолитной
-            Apply-Tweak "Отключение таймаута бездействия аудио GPU" { Set-ItemProperty -Path $PowerKey -Name "PerformanceIdleTime" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключаем таймаут бездействия
-            Apply-Tweak "Отключение задержки вставки аудио GPU" { Set-ItemProperty -Path $PowerKey -Name "DelayInsertion" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключаем задержку
-        } finally {
-            Restore-RegPermission -RegPath $ParentPath
+        $PowerKey = "$ParentPath\PowerMgmt"
+        if (Test-Path $PowerKey) {
+            Grant-RegPermission -RegPath $ParentPath
+            try {
+                Apply-Tweak "Откат PowerMgmt аудио-чипа GPU (ConservationIdleTime)" { Remove-ItemProperty -Path $PowerKey -Name "ConservationIdleTime" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                Apply-Tweak "Откат PowerMgmt аудио-чипа GPU (PerformanceIdleTime)" { Remove-ItemProperty -Path $PowerKey -Name "PerformanceIdleTime" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                Apply-Tweak "Откат PowerMgmt аудио-чипа GPU (DelayInsertion)" { Remove-ItemProperty -Path $PowerKey -Name "DelayInsertion" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            } finally {
+                Restore-RegPermission -RegPath $ParentPath
+            }
         }
     }
 }
@@ -6700,16 +6684,20 @@ if ($Devices) {
 }
 Apply-Tweak "Возврат прав на корень звука" { Restore-RegPermission -RegPath $AudioRender }
 
-# Экстремальное снижение задержки звука (PortCls Micro-Buffering)
+# Прямой откат настроек PortCls от предыдущего запуска
 $PortCls = "HKLM:\SYSTEM\CurrentControlSet\Services\PortCls\Parameters"
-if (!(Test-Path $PortCls)) { Apply-Tweak "Создание раздела PortCls" { New-Item $PortCls -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-Apply-Tweak "Снижение интервала DPC для аудио до 1 мс" { Set-ItemProperty -Path $PortCls -Name "DefaultDpcTime" -Value 1000 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Оптимальная очередь буфера аудио (DpcQueueDepth=2)" { Set-ItemProperty -Path $PortCls -Name "DpcQueueDepth" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Синхронизация звука с аппаратным таймером" { Set-ItemProperty -Path $PortCls -Name "EnableTimerResolution" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+if (Test-Path $PortCls) {
+    Apply-Tweak "Откат DefaultDpcTime в PortCls" { Remove-ItemProperty -Path $PortCls -Name "DefaultDpcTime" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Откат DpcQueueDepth в PortCls" { Remove-ItemProperty -Path $PortCls -Name "DpcQueueDepth" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Откат EnableTimerResolution в PortCls" { Remove-ItemProperty -Path $PortCls -Name "EnableTimerResolution" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+}
 
-# Отключение аппаратной разгрузки аудио (Hardware Audio Offload)
+# Прямой откат DisableAudioOffload и UserModeForceEngineLatency
 $AudioEngine = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio"
-Apply-Tweak "Отключение аппаратной разгрузки аудио (DisableAudioOffload = 1)" { Set-ItemProperty -Path $AudioEngine -Name "DisableAudioOffload" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+if (Test-Path $AudioEngine) {
+    Apply-Tweak "Откат DisableAudioOffload" { Remove-ItemProperty -Path $AudioEngine -Name "DisableAudioOffload" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Откат UserModeForceEngineLatency" { Remove-ItemProperty -Path $AudioEngine -Name "UserModeForceEngineLatency" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+}
 
 # Отключение эффектов пространственного звука (ТОЛЬКО если не подключен АВ-ресивер и это не ноутбук!)
 if (-not $global:IsLaptop -and -not $script:HasReceiverOrHdmi) {
@@ -6722,11 +6710,6 @@ if (-not $global:IsLaptop -and -not $script:HasReceiverOrHdmi) {
 $AudioDucking = "HKCU:\Software\Microsoft\Multimedia\Audio"
 if (!(Test-Path $AudioDucking)) { Apply-Tweak "Создание раздела Multimedia Audio" { New-Item -Path $AudioDucking -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 Apply-Tweak "Запрет приглушения звука (Audio Ducking)" { Set-ItemProperty -Path $AudioDucking -Name "UserDuckingPreference" -Value 3 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-
-# Форсирование низкоуровневой задержки звукового движка Windows (WASAPI Shared Mode)
-$AudioEnginePath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio"
-if (!(Test-Path $AudioEnginePath)) { Apply-Tweak "Создание раздела Audio" { New-Item $AudioEnginePath -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 | Out-Null } }
-Apply-Tweak "Установка минимальной задержки микшера (WASAPI 2ms)" { Set-ItemProperty -Path $AudioEnginePath -Name "UserModeForceEngineLatency" -Value 2000 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 # Отключение телеметрии эхоподавления (Защита от фризов audiodg.exe во время Discord)
 $AudioDiag = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio\Diagnostic"
@@ -8119,10 +8102,17 @@ $UselessServices = @(
 )
 
 # Если режим ИИ не выбран — переводим новую службу диспетчера сессий рабочих нагрузок ИИ (WsmSvc в 25H2/26H2) в ручной режим
-if (-not $global:OptAI -and (Get-Service -Name "WsmSvc" -ErrorAction SilentlyContinue)) {
-    Apply-Tweak "Перевод службы диспетчера нагрузок WsmSvc (26H2) в ручной режим" {
-        Stop-Service -Name "WsmSvc" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-        Set-Service -Name "WsmSvc" -StartupType Manual *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+if (Get-Service -Name "WsmSvc" -ErrorAction SilentlyContinue) {
+    if (-not $global:OptAI) {
+        Apply-Tweak "Перевод службы диспетчера нагрузок WsmSvc (26H2) в ручной режим" {
+            Stop-Service -Name "WsmSvc" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+            Set-Service -Name "WsmSvc" -StartupType Manual *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        }
+    } else {
+        Apply-Tweak "Возврат автозапуска службы диспетчера нагрузок WsmSvc (Режим ИИ)" {
+            Set-Service -Name "WsmSvc" -StartupType Automatic *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+            Start-Service -Name "WsmSvc" -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        }
     }
 }
 
@@ -8404,8 +8394,21 @@ Write-Host "====================================================================
 $ProcName = ($global:ProcInfo).Name # Получаем имя процессора
 if ($ProcName -match "Intel" -and ($ProcName -match "12\d{2}" -or $ProcName -match "13\d{2}" -or $ProcName -match "14\d{2}" -or $ProcName -match "Ultra")) {
     
+    # Прямой откат DevicePolicy для звуковых устройств от предыдущего запуска
+    $OldAudioAffinityDevices = Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Where-Object { $_.PNPDeviceID -match "^HDAUDIO" -or $_.PNPDeviceID -match "^PCI" }
+    if ($OldAudioAffinityDevices) {
+        foreach ($Device in $OldAudioAffinityDevices) {
+            if ($Device.PNPDeviceID) {
+                $AffinityKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Device.PNPDeviceID)\Device Parameters\Interrupt Management\Affinity Policy"
+                if (Test-Path $AffinityKey) {
+                    Apply-Tweak "Откат политики прерываний для $($Device.Name)" { Remove-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                    Apply-Tweak "Удаление жесткой маски прерываний для $($Device.Name)" { Remove-ItemProperty -Path $AffinityKey -Name "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                }
+            }
+        }
+    }
+
     $AllTargetDevices = @() # Инициализируем массив
-    $AllTargetDevices += Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Where-Object { $_.PNPDeviceID -match "^HDAUDIO" -or $_.PNPDeviceID -match "^PCI" }
     $AllTargetDevices += Get-CimInstance Win32_SCSIController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "NVMe" -or $_.Name -match "NVM Express" }
 
     if ($AllTargetDevices) {
@@ -9714,10 +9717,9 @@ $ShortcutDirs = @(
 # --enable-gpu-rasterization       : Отрисовка элементов интерфейса на видеокарте
 # --enable-zero-copy               : Прямая запись текстур в VRAM без копирования через ОЗУ
 # --ignore-gpu-blocklist           : Игнорирование черных списков драйверов
-# --disable-audio-output-resampler : Отключение программного ресемплинга звука
 # --disable-breakpad               : Отключение фонового генератора дампов падений
 # --disable-software-rasterizer    : Запрет рендеринга видео/анимаций на CPU при 100% нагрузке GPU
-$BaseFlags = "--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --disable-audio-output-resampler --disable-breakpad --disable-software-rasterizer"
+$BaseFlags = "--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --disable-breakpad --disable-software-rasterizer"
 
 # Оптимизация спящего режима вкладок в простое
 $IdleThrottleFeatures = @("CalculateNativeWinOcclusion", "IntensiveWakeUpThrottling", "QuickIntensiveThrottlingAfterLoading")
@@ -9728,12 +9730,8 @@ if ($IsRTX) {
     $BrowserSpecificFeatures += @("Vulkan", "VulkanFromANGLE", "DefaultANGLEVulkan", "RTXVideoHDR", "RTXVideoSuperResolution", "NvidiaVpSuperResolution", "NvidiaVpTrueHDR")
 }
 
-# Сначала определяем аудиопараметры (стерео 2.0 или акустика 5.1/7.1)
-if ($script:DetectedAudioChannels -ge 6) {
-    $BrowserAudioParams = " --try-supported-channel-layouts --audio-output-channels=$script:DetectedAudioChannels --disable-features=AudioServiceSandbox"
-} else {
-    $BrowserAudioParams = " --try-supported-channel-layouts --audio-output-channels=2"
-}
+# Не навязываем каналы и отключение ресемплера, чтобы не ломать Dolby Access Upmixer и переключение AVR
+$BrowserAudioParams = ""
 
 # Формируем единый список фичей для браузеров (Параллельная загрузка + Усыпление неактивных вкладок)
 $BrowserFeatures = $IdleThrottleFeatures + $BrowserSpecificFeatures
@@ -9746,6 +9744,13 @@ $BrowserFlags = "$BaseFlags$BrowserAudioParams$BrowserCombinedFeatures"
 $ElectronCombinedFeatures = " --enable-features=" + ($IdleThrottleFeatures -join ",")
 $ElectronFlags = "$BaseFlags --disable-crash-reporter --disable-logging$ElectronCombinedFeatures"
 
+$AudioFlagsToStrip = @(
+    "--disable-audio-output-resampler",
+    "--try-supported-channel-layouts",
+    "--audio-output-channels=\d+",
+    "--disable-features=AudioServiceSandbox"
+)
+
 foreach ($Dir in $ShortcutDirs) {
     if (Test-Path $Dir) {
         # Ищем все файлы ярлыков (.lnk) в директориях, включая скрытые подпапки (ImplicitAppShortcuts)
@@ -9755,23 +9760,36 @@ foreach ($Dir in $ShortcutDirs) {
                 $Shortcut = $WshShell.CreateShortcut($Link.FullName)
                 $TargetPath = $Shortcut.TargetPath.ToLower()
                 $CurrentArgs = $Shortcut.Arguments
+
+                # Удаляем старые аудио-флаги, если они были добавлены предыдущим запуском скрипта
+                $CleanedArgs = $CurrentArgs
+                foreach ($af in $AudioFlagsToStrip) { $CleanedArgs = $CleanedArgs -replace $af, "" }
+                $CleanedArgs = ($CleanedArgs -replace "\s{2,}", " ").Trim()
+                $ArgsChanged = ($CleanedArgs -ne $CurrentArgs)
+                $CurrentArgs = $CleanedArgs
                 
-                # 1. Если это WEB-БРАУЗЕР -> Инжектим $BrowserFlags с динамическим аудиостеком
+                # 1. Если это WEB-БРАУЗЕР -> Инжектим $BrowserFlags (без аудио-флагов)
                 if ($TargetPath -match "(\\|/)(chrome|msedge|brave|browser|opera)\.exe$") {
-                    # Проверяем, не были ли флаги уже внедрены ранее
                     if ($CurrentArgs -notmatch "--enable-zero-copy" -or $CurrentArgs -notmatch "CalculateNativeWinOcclusion") {
                         $Shortcut.Arguments = "$CurrentArgs $BrowserFlags".Trim()
-                        $Shortcut.Save() # Сохраняем ярлык
-                        Apply-Tweak "Оптимизация браузера (Zero-Idle + $($script:DetectedAudioChannels)ch Audio): $($Link.Name)" { Write-Output "[OK]" > $null }
+                        $Shortcut.Save()
+                        Apply-Tweak "Оптимизация браузера (Zero-Idle): $($Link.Name)" { Write-Output "[OK]" > $null }
+                    } elseif ($ArgsChanged) {
+                        $Shortcut.Arguments = $CurrentArgs
+                        $Shortcut.Save()
+                        Apply-Tweak "Откат аудио-флагов браузера: $($Link.Name)" { Write-Output "[OK]" > $null }
                     }
                 }
-                # 2. Если это ELECTRON-ЛАУНЧЕР/МЕССЕНДЖЕР -> Инжектим $ElectronFlags (Лимит ОЗУ, без многоканального форсинга)
+                # 2. Если это ELECTRON-ЛАУНЧЕР/МЕССЕНДЖЕР -> Инжектим $ElectronFlags (без аудио-флагов)
                 elseif ($TargetPath -match "(\\|/)(discord|spotify|epicgameslauncher|eadesktop|upc|gog galaxy|whatsapp|telegram)\.exe$") {
-                    # Корректная защита от повторного добавления аргументов в ярлык
                     if ($CurrentArgs -notmatch "--disable-crash-reporter") {
                         $Shortcut.Arguments = "$CurrentArgs $ElectronFlags".Trim()
-                        $Shortcut.Save() # Сохраняем ярлык
+                        $Shortcut.Save()
                         Apply-Tweak "Снижение жора ОЗУ (Electron) для: $($Link.Name)" { Write-Output "[OK]" > $null }
+                    } elseif ($ArgsChanged) {
+                        $Shortcut.Arguments = $CurrentArgs
+                        $Shortcut.Save()
+                        Apply-Tweak "Откат аудио-флагов (Electron) для: $($Link.Name)" { Write-Output "[OK]" > $null }
                     }
                 }
             } catch {}
@@ -9806,16 +9824,12 @@ user_pref("gfx.webrender.precache-shaders", true);     // Предварител
 user_pref("image.mem.decode_bytes_at_a_time", 65536);  // Увеличение чанка декодирования картинок до 64 КБ
 
 // ==============================================================================
-// 3. Звуковой движок WASAPI, отключение ресемплера и динамические каналы
+// 3. Аппаратное декодирование видео и громкость
 // ==============================================================================
-user_pref("media.cubeb.backend", "wasapi");            // Нативный низкоуровневый аудиостек Windows (WASAPI Exclusive)
-user_pref("media.resampling.enabled", false);          // Отключение программного ресемплинга для прямого вывода звука
 user_pref("media.volume_scale", "1.0");                // Фиксация шкалы громкости без искажений
 user_pref("media.hardware-video-decoding.force-enabled", true); // Форсирование декодирования видео на чипе GPU
 user_pref("media.hardware-video-decoding.failed", false); // Сброс маркера ошибки аппаратного декодирования
 user_pref("media.windows-media-foundation.allow-d3d11-video", true); // Использование DirectX 11 для воспроизведения видео
-user_pref("media.use-audio-channel-api", true);        // Активация API мультиканального позиционирования звука
-user_pref("media.audio_device.audio_processing.force_channel_count", $(if ($script:DetectedAudioChannels) { $script:DetectedAudioChannels } else { 2 })); // Адаптивное число каналов по умолчанию (2 для стерео, 6 для 5.1, 8 для 7.1)
 user_pref("media.wmf.hevc.enabled", 1);                // Аппаратное декодирование кодека HEVC (нужно для 4K/5.1 на стримингах)
 user_pref("media.wmf.vp9.enabled", 1);                 // Аппаратное декодирование кодека VP9 (для YouTube 4K 60FPS)
 
@@ -10163,6 +10177,11 @@ if (-not $global:OptAntiCheat) {
         Apply-Tweak "Отключение службы TpmTasks" { Set-Service -Name "TpmTasks" -StartupType Disabled *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Отключаем
     }
     Apply-Tweak "Отключение фонового опроса TPM в планировщике" { Get-ScheduledTask -TaskPath "\Microsoft\Windows\TPM\" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | Disable-ScheduledTask | Out-Null } # Выключаем периодические задачи в планировщике
+} else {
+    if (Get-Service -Name "TpmTasks" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log) {
+        Apply-Tweak "Восстановление службы TpmTasks (Режим Античита)" { Set-Service -Name "TpmTasks" -StartupType Manual *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    }
+    Apply-Tweak "Включение фоновых задач TPM в планировщике (Режим Античита)" { Get-ScheduledTask -TaskPath "\Microsoft\Windows\TPM\" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | Enable-ScheduledTask *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
 
 # Блокировка Cross-Device Resume (Анти-статтер)
@@ -10512,7 +10531,8 @@ $OldToolsSubMenus = @(
     "00_ThreadDirector", "00_AIFlush", "01_ClearJunk", "01b_FlushRam", "01c_ClearShaders",
     "01_CleanMenu", "01_SteamLite", "01_SteamCompact", "02_CleanMenu", "02_RestartExplorer",
     "02_SystemMenu", "03_KillNotResponding", "03_SystemMenu", "04_AudioFix", "04_ResetWindowsUpdate",
-    "04b_ToggleMPO", "04c_RestoreMaxHz", "05_SteamLite", "06_PowerMenu", "07_RebootMenu", "08_AIFlush"
+    "04_AudioModeMenu", "04b_ToggleMPO", "04c_RestoreMaxHz", "05_SteamLite", "06_PowerMenu", "07_RebootMenu", "08_AIFlush",
+    "03_SystemMenu\shell\02_ToggleMPO", "03_SystemMenu\shell\03_RestoreMaxHz"
 )
 
 foreach ($Sub in $OldToolsSubMenus) {
@@ -10527,7 +10547,7 @@ foreach ($Sub in $OldToolsSubMenus) {
 # 3. Очистка подменю второго меню Eastrica Tools Extra (Защита от фантомных пунктов при смене режимов)
 $EastricaExtraShell = "HKCR:\Directory\Background\shell\EastricaToolsExtra\shell"
 $OldExtraSubMenus = @(
-    "01_PowerMenu", "02_ServicesMenu", "03_NetworkMenu", "04_RebootMenu"
+    "01_PowerMenu", "01b_AudioModeMenu", "02_ServicesMenu", "03_NetworkMenu", "04_RebootMenu"
 )
 
 foreach ($ExtraSub in $OldExtraSubMenus) {
@@ -11342,13 +11362,17 @@ $wshell.Popup("Герцовка дисплея установлена на ма�
     Apply-Tweak "Установка названия для кнопки RestoreMaxHz" { Set-ItemProperty -Path $MenuKey_Hz -Name "MUIVerb" -Value (L "Восстановить максимальную герцовку (Hz)" "Restore Maximum Refresh Rate (Hz)") -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     Apply-Tweak "Установка иконки для кнопки RestoreMaxHz" { Set-ItemProperty -Path $MenuKey_Hz -Name "Icon" -Value "imageres.dll,-109" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     Apply-Tweak "Привязка команды восстановления герцовки" { Set-Item -Path "$MenuKey_Hz\command" -Value "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$HzScriptPath`"" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+} else {
+    Apply-Tweak "Удаление скрипта переключения MPO (Режим ИИ)" { if (Test-Path -LiteralPath "$OptimizerDir\EastricaToggleMPO.ps1") { Remove-Item -LiteralPath "$OptimizerDir\EastricaToggleMPO.ps1" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
+    Apply-Tweak "Удаление скрипта восстановления герцовки (Режим ИИ)" { if (Test-Path -LiteralPath "$OptimizerDir\EastricaRestoreHz.ps1") { Remove-Item -LiteralPath "$OptimizerDir\EastricaRestoreHz.ps1" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 }
 
 # ==============================================================================
 # Утилита аппаратного замера частоты опроса мыши (C# WinAPI Raw Input)
 # ==============================================================================
-$MouseTesterScriptPath = "$OptimizerDir\EastricaMouseTester.ps1"
-$MouseTesterScriptCode = @'
+if (-not $global:OptAI) {
+    $MouseTesterScriptPath = "$OptimizerDir\EastricaMouseTester.ps1"
+    $MouseTesterScriptCode = @'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -11651,17 +11675,17 @@ $app.ShowDialog() | Out-Null
 $app.Dispose()
 '@
 
-Apply-Tweak "Создание утилиты замера частоты мыши (Raw Input)" { 
-    Set-Content -Path $MouseTesterScriptPath -Value $MouseTesterScriptCode -Encoding UTF8 -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 
+    Apply-Tweak "Создание утилиты замера частоты мыши (Raw Input)" { 
+        Set-Content -Path $MouseTesterScriptPath -Value $MouseTesterScriptCode -Encoding UTF8 -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 
+    }
+    $MenuKey_MouseTest = "$SystemShell\05_MouseTester"
+    if (!(Test-Path "$MenuKey_MouseTest\command")) { 
+        Apply-Tweak "Создание ключа команды MouseTester" { New-Item -Path "$MenuKey_MouseTest\command" -Force | Out-Null } 
+    }
+    Apply-Tweak "Установка названия для кнопки MouseTester" { Set-ItemProperty -Path $MenuKey_MouseTest -Name "MUIVerb" -Value (L "Тест частоты опроса мыши (Raw Input Hz)" "Mouse Polling Rate Tester (Raw Input Hz)") -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Установка иконки для кнопки MouseTester" { Set-ItemProperty -Path $MenuKey_MouseTest -Name "Icon" -Value "main.cpl,0" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Привязка команды запуска тестера мыши" { Set-Item -Path "$MenuKey_MouseTest\command" -Value "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$MouseTesterScriptPath`"" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
-
-$MenuKey_MouseTest = "$SystemShell\05_MouseTester"
-if (!(Test-Path "$MenuKey_MouseTest\command")) { 
-    Apply-Tweak "Создание ключа команды MouseTester" { New-Item -Path "$MenuKey_MouseTest\command" -Force | Out-Null } 
-}
-Apply-Tweak "Установка названия для кнопки MouseTester" { Set-ItemProperty -Path $MenuKey_MouseTest -Name "MUIVerb" -Value (L "Тест частоты опроса мыши (Raw Input Hz)" "Mouse Polling Rate Tester (Raw Input Hz)") -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Установка иконки для кнопки MouseTester" { Set-ItemProperty -Path $MenuKey_MouseTest -Name "Icon" -Value "main.cpl,0" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Привязка команды запуска тестера мыши" { Set-Item -Path "$MenuKey_MouseTest\command" -Value "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$MouseTesterScriptPath`"" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 # ---------------------------------------------------------
 # Сброс и реанимация Центра обновлений (Reset WU)
@@ -11790,7 +11814,7 @@ Apply-Tweak "Привязка команды сброса Windows Update" { Set-
 # ---------------------------------------------------------
 # Кнопка: Steam Compact (расположен под Thread Director)
 # ---------------------------------------------------------
-if ($global:OptAntiCheat) {
+if ($global:OptAntiCheat -and -not $global:OptAI) {
     Remove-Item -LiteralPath "$EastricaShell\01_SteamLite" -Recurse -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
     $MenuKey_Steam = "$EastricaShell\01_SteamCompact"
     if (!(Test-Path "$MenuKey_Steam\command")) { Apply-Tweak "Создание раздела команды для SteamCompact" { New-Item -Path "$MenuKey_Steam\command" -Force | Out-Null } }
@@ -11897,6 +11921,330 @@ $wshell.Popup($msg, 3, (L "Питание" "Power Plan"), 262208) | Out-Null
     Apply-Tweak "Установка названия PowerBalanced" { Set-ItemProperty -Path $Balanced -Name "MUIVerb" -Value $TitleBal -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     Apply-Tweak "Установка иконки PowerBalanced" { Set-ItemProperty -Path $Balanced -Name "Icon" -Value "powercpl.dll,-506" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     Apply-Tweak "Привязка скрипта к PowerBalanced" { Set-Item -Path "$Balanced\command" -Value "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$PowerScriptPath`" -Mode Balanced" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+} else {
+    Apply-Tweak "Удаление скрипта переключения питания (Режим ИИ)" { if (Test-Path -LiteralPath "$OptimizerDir\EastricaSwitchPower.ps1") { Remove-Item -LiteralPath "$OptimizerDir\EastricaSwitchPower.ps1" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
+}
+
+# ---------------------------------------------------------
+# Кнопка: Режим звука (AVR: Стерео / 7.1 / Dolby Atmos)
+# ---------------------------------------------------------
+if (-not $global:OptAI) {
+    $AudioModeScriptPath = "$OptimizerDir\EastricaSwitchAudioMode.ps1"
+    $AudioModeScriptCode = @'
+param([ValidateSet("Stereo", "Surround71", "Atmos", "Status")][string]$Mode = "Stereo")
+
+if ($Mode -ne "Status" -and !([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Mode $Mode" -Verb RunAs
+    Exit
+}
+
+$ErrorActionPreference = "SilentlyContinue"
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+
+$global:IsRU = ((Get-UICulture).TwoLetterISOLanguageName -eq "ru")
+function L ([string]$Ru, [string]$En) { if ($global:IsRU) { return $Ru } else { return $En } }
+
+if (-not ("AVRAudioHelper" -as [type])) {
+    Add-Type -TypeDefinition @"
+    using System;
+    using System.Runtime.InteropServices;
+
+    public class AVRAudioHelper {
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+        private class MMDeviceEnumeratorComObject { }
+
+        [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMMDeviceEnumerator {
+            [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+            [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+        }
+
+        [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMMDevice {
+            [PreserveSig] int Activate(ref Guid id, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object interfacePointer);
+            [PreserveSig] int OpenPropertyStore(int stgmAccess, out IPropertyStore properties);
+            [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string strId);
+        }
+
+        [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IPropertyStore {
+            [PreserveSig] int GetCount(out int count);
+            [PreserveSig] int GetAt(int iProp, out PROPERTYKEY pkey);
+            [PreserveSig] int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+            [PreserveSig] int SetValue(ref PROPERTYKEY key, ref PROPVARIANT propvar);
+            [PreserveSig] int Commit();
+        }
+
+        [ComImport, Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")]
+        private class CPolicyConfigClient { }
+
+        [ComImport, Guid("f8679f50-850a-41cf-9c72-430f290290c8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IPolicyConfig {
+            [PreserveSig] int GetMixFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, out IntPtr ppFormat);
+            [PreserveSig] int GetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bDefault, out IntPtr ppFormat);
+            [PreserveSig] int ResetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName);
+            [PreserveSig] int SetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, IntPtr pEndpointFormat, IntPtr pMixFormat);
+            [PreserveSig] int GetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bDefault, out long pmftDefaultPeriod, out long pmftMinimumPeriod);
+            [PreserveSig] int SetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, ref long pmftPeriod);
+            [PreserveSig] int GetShareMode([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, IntPtr pMode);
+            [PreserveSig] int SetShareMode([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, IntPtr mode);
+            [PreserveSig] int GetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bFxStore, ref PROPERTYKEY key, out PROPVARIANT pv);
+            [PreserveSig] int SetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bFxStore, ref PROPERTYKEY key, ref PROPVARIANT pv);
+            [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, int role);
+            [PreserveSig] int SetEndpointVisibility([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bVisible);
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROPERTYKEY { public Guid fmtid; public uint pid; }
+
+        [StructLayout(LayoutKind.Explicit, Size = 24)]
+        private struct PROPVARIANT {
+            [FieldOffset(0)] public ushort vt;
+            [FieldOffset(8)] public uint ulVal;
+            [FieldOffset(8)] public IntPtr ptrVal;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private struct WAVEFORMATEXTENSIBLE {
+            public ushort wFormatTag;
+            public ushort nChannels;
+            public uint nSamplesPerSec;
+            public uint nAvgBytesPerSec;
+            public ushort nBlockAlign;
+            public ushort wBitsPerSample;
+            public ushort cbSize;
+            public ushort wValidBitsPerSample;
+            public uint dwChannelMask;
+            public Guid SubFormat;
+        }
+
+        [DllImport("ole32.dll")]
+        private static extern int PropVariantClear(ref PROPVARIANT pvar);
+
+        public static string GetDefaultEndpointId() {
+            IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+            IMMDevice dev = null;
+            if (enumerator.GetDefaultAudioEndpoint(0, 0, out dev) != 0 || dev == null) return "";
+            string id = "";
+            dev.GetId(out id);
+            return id ?? "";
+        }
+
+        public static string GetDefaultEndpointFriendlyName() {
+            try {
+                IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                IMMDevice dev = null;
+                if (enumerator.GetDefaultAudioEndpoint(0, 0, out dev) != 0 || dev == null) return "Audio Device";
+                IPropertyStore store;
+                if (dev.OpenPropertyStore(0, out store) != 0 || store == null) return "Audio Device";
+                PROPERTYKEY pkey = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 14 };
+                PROPVARIANT pv = new PROPVARIANT();
+                store.GetValue(ref pkey, out pv);
+                string name = (pv.vt == 31 && pv.ptrVal != IntPtr.Zero) ? Marshal.PtrToStringUni(pv.ptrVal) : "Audio Device";
+                PropVariantClear(ref pv);
+                return name;
+            } catch { return "Audio Device"; }
+        }
+
+        public static int GetCurrentChannels(string endpointId) {
+            IntPtr pFmt = IntPtr.Zero;
+            try {
+                IPolicyConfig policy = (IPolicyConfig)new CPolicyConfigClient();
+                if (policy.GetDeviceFormat(endpointId, false, out pFmt) == 0 && pFmt != IntPtr.Zero) {
+                    return (int)Marshal.ReadInt16(pFmt, 2);
+                }
+            } catch {} finally {
+                if (pFmt != IntPtr.Zero) Marshal.FreeCoTaskMem(pFmt);
+            }
+            return 2;
+        }
+
+        public static bool SetSpeakerLayout(string endpointId, ushort channels, uint channelMask) {
+            IPolicyConfig policy = (IPolicyConfig)new CPolicyConfigClient();
+
+            PROPERTYKEY pkeyPhys = new PROPERTYKEY { fmtid = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 3 };
+            PROPERTYKEY pkeyFull = new PROPERTYKEY { fmtid = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 6 };
+            PROPVARIANT pv = new PROPVARIANT { vt = 19, ulVal = channelMask };
+            policy.SetPropertyValue(endpointId, false, ref pkeyPhys, ref pv);
+            policy.SetPropertyValue(endpointId, false, ref pkeyFull, ref pv);
+
+            Guid pcmSub = new Guid("00000001-0000-0010-8000-00aa00389b71");
+            Guid fltSub = new Guid("00000003-0000-0010-8000-00aa00389b71");
+
+            WAVEFORMATEXTENSIBLE mixFmt = new WAVEFORMATEXTENSIBLE {
+                wFormatTag = 0xFFFE,
+                nChannels = channels,
+                nSamplesPerSec = 48000,
+                wBitsPerSample = 32,
+                nBlockAlign = (ushort)(channels * 4),
+                nAvgBytesPerSec = (uint)(48000 * channels * 4),
+                cbSize = 22,
+                wValidBitsPerSample = 32,
+                dwChannelMask = channelMask,
+                SubFormat = fltSub
+            };
+
+            IntPtr pMix = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WAVEFORMATEXTENSIBLE)));
+            IntPtr pEnd = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WAVEFORMATEXTENSIBLE)));
+            try {
+                Marshal.StructureToPtr(mixFmt, pMix, false);
+
+                ushort[] bitDepths  = new ushort[] { 24, 32, 16 };
+                ushort[] validDepth = new ushort[] { 24, 24, 16 };
+
+                for (int i = 0; i < bitDepths.Length; i++) {
+                    ushort b = bitDepths[i];
+                    ushort align = (ushort)(channels * (b / 8));
+                    WAVEFORMATEXTENSIBLE devFmt = new WAVEFORMATEXTENSIBLE {
+                        wFormatTag = 0xFFFE,
+                        nChannels = channels,
+                        nSamplesPerSec = 48000,
+                        wBitsPerSample = b,
+                        nBlockAlign = align,
+                        nAvgBytesPerSec = (uint)(48000 * align),
+                        cbSize = 22,
+                        wValidBitsPerSample = validDepth[i],
+                        dwChannelMask = channelMask,
+                        SubFormat = pcmSub
+                    };
+                    Marshal.StructureToPtr(devFmt, pEnd, false);
+                    int hr = policy.SetDeviceFormat(endpointId, pEnd, pMix);
+                    if (hr == 0) return true;
+                }
+            } finally {
+                Marshal.FreeHGlobal(pMix);
+                Marshal.FreeHGlobal(pEnd);
+            }
+            return false;
+        }
+    }
+"@ -Language CSharp
+}
+
+function Invoke-WinRTAsync ($AsyncOp, [Type]$ResultType) {
+    $asTaskMethod = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+        $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+    })[0]
+    $task = $asTaskMethod.MakeGenericMethod($ResultType).Invoke($null, @($AsyncOp))
+    $task.Wait() | Out-Null
+    return $task.Result
+}
+
+$endpointId = [AVRAudioHelper]::GetDefaultEndpointId()
+if ([string]::IsNullOrWhiteSpace($endpointId)) {
+    if ($Mode -ne "Status") {
+        (New-Object -ComObject Wscript.Shell).Popup((L "Не найдено активное устройство вывода звука!" "No active playback audio device found!"), 3, (L "Режим звука" "Audio Mode"), 16) | Out-Null
+    }
+    Exit
+}
+
+$null = [Windows.Media.Audio.SpatialAudioDeviceConfiguration, Windows.Media, ContentType=WindowsRuntime]
+$null = [Windows.Media.Audio.SpatialAudioFormatSubtype, Windows.Media, ContentType=WindowsRuntime]
+$resType = [Windows.Media.Audio.SetDefaultSpatialAudioFormatResult, Windows.Media, ContentType=WindowsRuntime]
+
+$winRtId = "\\?\SWD#MMDEVAPI#$endpointId#{e6327cad-dcec-4949-ae8a-991e976a79d2}"
+$spatialCfg = [Windows.Media.Audio.SpatialAudioDeviceConfiguration]::GetForDeviceId($winRtId)
+$atmosGuid = [Windows.Media.Audio.SpatialAudioFormatSubtype]::DolbyAtmosForHomeTheater
+
+if ($Mode -eq "Status") {
+    $activeFmt = $spatialCfg.DefaultSpatialAudioFormat
+    if ($activeFmt -eq $atmosGuid) { Write-Output "Atmos" }
+    elseif ([AVRAudioHelper]::GetCurrentChannels($endpointId) -ge 6) { Write-Output "Surround71" }
+    else { Write-Output "Stereo" }
+    Exit
+}
+
+$wshell = New-Object -ComObject Wscript.Shell
+$devName = [AVRAudioHelper]::GetDefaultEndpointFriendlyName()
+$msg = ""
+
+if ($Mode -eq "Stereo") {
+    try {
+        if ($spatialCfg -and -not [string]::IsNullOrEmpty($spatialCfg.DefaultSpatialAudioFormat)) {
+            $null = Invoke-WinRTAsync ($spatialCfg.SetDefaultSpatialAudioFormatAsync("")) $resType
+        }
+    } catch {}
+    $ok = [AVRAudioHelper]::SetSpeakerLayout($endpointId, 2, 0x3)
+    $msg = L "Установлен режим: Стерео 2.0 (24-bit / 48kHz)`nУстройство: $devName`nПространственный звук: Выкл (Dolby Surround)" "Mode set: Stereo 2.0 (24-bit / 48kHz)`nDevice: $devName`nSpatial Sound: Off (Dolby Surround)"
+}
+elseif ($Mode -eq "Surround71") {
+    try {
+        if ($spatialCfg -and -not [string]::IsNullOrEmpty($spatialCfg.DefaultSpatialAudioFormat)) {
+            $null = Invoke-WinRTAsync ($spatialCfg.SetDefaultSpatialAudioFormatAsync("")) $resType
+        }
+    } catch {}
+    $ok = [AVRAudioHelper]::SetSpeakerLayout($endpointId, 8, 0x63F)
+    $msg = L "Установлен режим: 7.1 Surround (24-bit / 48kHz)`nУстройство: $devName`nПространственный звук: Выкл" "Mode set: 7.1 Surround (24-bit / 48kHz)`nDevice: $devName`nSpatial Sound: Off"
+}
+elseif ($Mode -eq "Atmos") {
+    [void][AVRAudioHelper]::SetSpeakerLayout($endpointId, 8, 0x63F)
+    $atmosRes = $null
+    try {
+        if ($spatialCfg -and $spatialCfg.IsSpatialAudioFormatSupported($atmosGuid)) {
+            $atmosRes = Invoke-WinRTAsync ($spatialCfg.SetDefaultSpatialAudioFormatAsync($atmosGuid)) $resType
+        }
+    } catch {}
+    if ($atmosRes -and $atmosRes.Status.ToString() -eq "Succeeded") {
+        $msg = L "Установлен режим: Dolby Atmos for Home Theater`nУстройство: $devName`nБазовый макет: 7.1 Surround (48kHz)" "Mode set: Dolby Atmos for Home Theater`nDevice: $devName`nBase layout: 7.1 Surround (48kHz)"
+    } else {
+        $statusTxt = if ($atmosRes) { $atmosRes.Status.ToString() } else { "NotSupported" }
+        $msg = L "Не удалось включить Dolby Atmos for Home Theater ($statusTxt).`nПроверьте, установлено ли приложение Dolby Access и подключен ли ресивер.`nУстройство: $devName" "Failed to enable Dolby Atmos for Home Theater ($statusTxt).`nCheck that Dolby Access is installed and your AVR is connected.`nDevice: $devName"
+    }
+}
+
+try {
+    $MenuShell = "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\EastricaTools\shell\04_AudioModeMenu\shell"
+    $lblStereo = L "Стерео 2.0 (YouTube -> Surround)" "Stereo 2.0 (YouTube -> Surround)"
+    $lbl71     = L "7.1 Surround (Без Atmos / Фильмы)" "7.1 Surround (No Atmos / Movies)"
+    $lblAtmos  = L "Dolby Atmos for Home Theater (Игры)" "Dolby Atmos for Home Theater (Games)"
+
+    Set-ItemProperty -Path "$MenuShell\01_AudioStereo" -Name "MUIVerb" -Value $(if ($Mode -eq "Stereo") { "✔ $lblStereo" } else { $lblStereo }) -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "$MenuShell\02_Audio71"     -Name "MUIVerb" -Value $(if ($Mode -eq "Surround71") { "✔ $lbl71" } else { $lbl71 }) -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "$MenuShell\03_AudioAtmos"  -Name "MUIVerb" -Value $(if ($Mode -eq "Atmos") { "✔ $lblAtmos" } else { $lblAtmos }) -Force -ErrorAction SilentlyContinue
+} catch {}
+
+$wshell.Popup($msg, 4, (L "Режим звука (AVR)" "Audio Mode (AVR)"), 262208) | Out-Null
+'@
+    Apply-Tweak "Создание скрипта переключения режимов звука (Atmos)" { Set-Content -Path $AudioModeScriptPath -Value $AudioModeScriptCode -Encoding UTF8 -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+
+    $MenuKey_AudioMode = "$EastricaShell\04_AudioModeMenu"
+    $AudioModeShell = "$MenuKey_AudioMode\shell"
+    if (!(Test-Path $MenuKey_AudioMode)) { Apply-Tweak "Создание раздела подменю AudioModeMenu" { New-Item -Path $MenuKey_AudioMode -Force | Out-Null } }
+    Apply-Tweak "Установка названия подменю AudioModeMenu" { Set-ItemProperty -Path $MenuKey_AudioMode -Name "MUIVerb" -Value (L "Режим звука (AVR)" "Audio Mode (AVR)") -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Установка иконки подменю AudioModeMenu" { Set-ItemProperty -Path $MenuKey_AudioMode -Name "Icon" -Value "mmres.dll,-3013" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Включение подкоманд для AudioModeMenu" { Set-ItemProperty -Path $MenuKey_AudioMode -Name "SubCommands" -Value "" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    if (!(Test-Path $AudioModeShell)) { Apply-Tweak "Создание Shell для подменю AudioModeMenu" { New-Item -Path $AudioModeShell -Force | Out-Null } }
+
+    $CurrentAudioState = "Stereo"
+    try { $CurrentAudioState = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $AudioModeScriptPath -Mode Status 2>$null | Out-String).Trim() } catch {}
+
+    $lblAudioStereo = L "Стерео 2.0 (YouTube -> Surround)" "Stereo 2.0 (YouTube -> Surround)"
+    $lblAudio71     = L "7.1 Surround (Без Atmos / Фильмы)" "7.1 Surround (No Atmos / Movies)"
+    $lblAudioAtmos  = L "Dolby Atmos for Home Theater (Игры)" "Dolby Atmos for Home Theater (Games)"
+
+    $TitleAudioStereo = if ($CurrentAudioState -eq "Stereo")     { "✔ $lblAudioStereo" } else { $lblAudioStereo }
+    $TitleAudio71     = if ($CurrentAudioState -eq "Surround71") { "✔ $lblAudio71" }     else { $lblAudio71 }
+    $TitleAudioAtmos  = if ($CurrentAudioState -eq "Atmos")      { "✔ $lblAudioAtmos" }  else { $lblAudioAtmos }
+
+    $AudioOptStereo = "$AudioModeShell\01_AudioStereo"
+    if (!(Test-Path "$AudioOptStereo\command")) { Apply-Tweak "Создание команды AudioStereo" { New-Item -Path "$AudioOptStereo\command" -Force | Out-Null } }
+    Apply-Tweak "Установка названия AudioStereo" { Set-ItemProperty -Path $AudioOptStereo -Name "MUIVerb" -Value $TitleAudioStereo -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Установка иконки AudioStereo" { Set-ItemProperty -Path $AudioOptStereo -Name "Icon" -Value "mmres.dll,-3004" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Привязка скрипта к AudioStereo" { Set-Item -Path "$AudioOptStereo\command" -Value "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$AudioModeScriptPath`" -Mode Stereo" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+
+    $AudioOpt71 = "$AudioModeShell\02_Audio71"
+    if (!(Test-Path "$AudioOpt71\command")) { Apply-Tweak "Создание команды Audio71" { New-Item -Path "$AudioOpt71\command" -Force | Out-Null } }
+    Apply-Tweak "Установка названия Audio71" { Set-ItemProperty -Path $AudioOpt71 -Name "MUIVerb" -Value $TitleAudio71 -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Установка иконки Audio71" { Set-ItemProperty -Path $AudioOpt71 -Name "Icon" -Value "mmres.dll,-3012" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Привязка скрипта к Audio71" { Set-Item -Path "$AudioOpt71\command" -Value "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$AudioModeScriptPath`" -Mode Surround71" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+
+    $AudioOptAtmos = "$AudioModeShell\03_AudioAtmos"
+    if (!(Test-Path "$AudioOptAtmos\command")) { Apply-Tweak "Создание команды AudioAtmos" { New-Item -Path "$AudioOptAtmos\command" -Force | Out-Null } }
+    Apply-Tweak "Установка названия AudioAtmos" { Set-ItemProperty -Path $AudioOptAtmos -Name "MUIVerb" -Value $TitleAudioAtmos -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Установка иконки AudioAtmos" { Set-ItemProperty -Path $AudioOptAtmos -Name "Icon" -Value "mmres.dll,-3013" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Привязка скрипта к AudioAtmos" { Set-Item -Path "$AudioOptAtmos\command" -Value "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$AudioModeScriptPath`" -Mode Atmos" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+} else {
+    Apply-Tweak "Удаление скрипта переключения режимов звука (Режим ИИ)" { if (Test-Path -LiteralPath "$OptimizerDir\EastricaSwitchAudioMode.ps1") { Remove-Item -LiteralPath "$OptimizerDir\EastricaSwitchAudioMode.ps1" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 }
 
 # ---------------------------------------------------------
@@ -13043,6 +13391,49 @@ $wshell.Popup("ИИ-процессы завершены. Оперативная 
     Apply-Tweak "Удаление скрипта очистки памяти ИИ (AIFlush)" {
         $flushPath = Join-Path $BaseDir 'Scripts\EastricaAIFlush.ps1'
         if (Test-Path -LiteralPath $flushPath) { Remove-Item -LiteralPath $flushPath -Force -ErrorAction Stop }
+    }
+
+    $AiEnvVarsToRemove = @(
+        "OLLAMA_KV_CACHE_TYPE", "CUDA_MANAGED_FORCE_DEVICE_ALLOC", "TORCH_NCCL_BLOCKING_WAIT",
+        "MKL_DEBUG_CPU_TYPE", "MKL_ENABLE_INSTRUCTIONS", "KMP_WARNINGS", "PYTORCH_CUDA_ALLOC_CONF",
+        "KMP_DUPLICATE_LIB_OK", "DISTUTILS_USE_SDK", "HF_HUB_HTTP_RETRIES", "CUDA_MODULE_LOADING",
+        "TORCH_CUDNN_V8_API_ENABLED", "CUDA_CACHE_MAXSIZE", "HF_HUB_DOWNLOAD_TIMEOUT", "HF_HUB_ETAG_TIMEOUT",
+        "TORCH_COMPILE_DEBUG", "TORCH_LOGS", "GGML_VK_VISIBLE_DEVICES", "GGML_VK_FORCE_MAX_ALLOCATION",
+        "DML_VISIBLE_DEVICES", "GPU_MAX_ALLOC_PERCENT", "HIP_FORCE_DEV_KERNARG", "OMP_NUM_THREADS",
+        "KMP_BLOCKTIME", "KMP_AFFINITY", "GGML_CUDA_ENABLE_UNIFIED_MEMORY", "OMP_WAIT_POLICY",
+        "OMP_PROC_BIND", "CUDA_DEVICE_MAX_CONNECTIONS", "OLLAMA_FLASH_ATTENTION", "OLLAMA_NUM_PARALLEL",
+        "XFORMERS_FORCE_DISABLE_TRITON", "RAY_DISABLE_TELEMETRY", "HF_HUB_DISABLE_SYMLINKS_WARNING",
+        "CUDA_CACHE_PATH", "CUDA_ENABLE_COREDUMP_ON_EXCEPTION", "OPENCV_LOG_LEVEL",
+        "CUDA_DEVICE_DEFAULT_PERSISTING_L2_CACHE_PERCENTAGE", "CUDA_DEVICE_ORDER", "NCCL_P2P_DISABLE",
+        "NCCL_P2P_LEVEL", "NCCL_NET_GDR_LEVEL", "NCCL_IB_DISABLE", "TORCHINDUCTOR_CACHE_DIR",
+        "NINJA_FLAGS", "MAX_JOBS", "SAFETENSORS_FAST_GPU", "HF_HUB_ENABLE_HF_TRANSFER",
+        "PYTHONUNBUFFERED", "HF_HUB_DISABLE_TELEMETRY", "GRADIO_ANALYTICS_ENABLED", "DO_NOT_TRACK",
+        "ANONYMIZED_TELEMETRY", "DISABLE_TELEMETRY", "ORT_TENSORRT_FP16_ENABLE", "ORT_TENSORRT_ENGINE_CACHE_ENABLE",
+        "PIP_NO_CACHE_DIR", "PYTHONOPTIMIZE", "PIP_DISABLE_PIP_VERSION_CHECK", "OMP_MAX_ACTIVE_LEVELS",
+        "TF_ENABLE_ONEDNN_OPTS", "BITSANDBYTES_NOWELCOME", "TORCH_CUDNN_SDPA_ENABLED", "UV_LINK_MODE",
+        "UV_CACHE_DIR", "TOKENIZERS_PARALLELISM", "CUBLAS_WORKSPACE_CONFIG", "CUDNN_FRONTEND_NOTELEMETRY",
+        "OLLAMA_HOST", "TORCH_EXTENSIONS_DIR", "TRITON_CACHE_DIR"
+    )
+    Apply-Tweak "Откат системных переменных среды ИИ" {
+        foreach ($v in $AiEnvVarsToRemove) {
+            [Environment]::SetEnvironmentVariable($v, $null, "Machine")
+        }
+    }
+
+    $HttpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\HTTP\Parameters"
+    if (Test-Path $HttpParams) {
+        Apply-Tweak "Откат лимитов HTTP.sys (Режим ИИ)" {
+            Remove-ItemProperty -Path $HttpParams -Name "EnableConnectionRateLimiting" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+            Remove-ItemProperty -Path $HttpParams -Name "MaxConnections" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        }
+    }
+
+    $AIAppsRollback = @("python.exe", "pythonw.exe", "llama-server.exe", "main.exe", "ollama.exe", "comfyui.exe", "lmstudio.exe", "docker.exe", "node.exe", "vmmem.exe", "vmmemWSL.exe", "wslservice.exe", "com.docker.backend.exe", "com.docker.proxy.exe")
+    foreach ($App in $AIAppsRollback) {
+        $BaseAppPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$App"
+        if (Test-Path -LiteralPath $BaseAppPath) {
+            Apply-Tweak "Откат IFEO для процесса ИИ ($App)" { Remove-Item -LiteralPath $BaseAppPath -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        }
     }
 }
 
@@ -15900,6 +16291,27 @@ if (-not $global:OptAI) {
 
     # Jemalloc: Борьба с фрагментацией ОЗУ (Помогает от утечек памяти в Rust, Minecraft)
     Apply-Tweak "Jemalloc: Оптимизация фрагментации памяти" { [Environment]::SetEnvironmentVariable("MALLOC_CONF", "dirty_decay_ms:2000,muzzy_decay_ms:2000", "Machine") }
+} else {
+    $GameEnvVarsToRemove = @(
+        "__GL_SYNC_TO_VBLANK", "__GL_MaxFramesAllowed", "DXVK_STATE_CACHE", "DXVK_ENABLE_NVAPI", "DXVK_LOG_LEVEL",
+        "__GL_SHADER_DISK_CACHE", "__GL_SHADER_DISK_CACHE_SIZE", "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP",
+        "D3D_SHADER_CACHE_SIZE", "ELECTRON_DISABLE_SECURITY_WARNINGS", "ELECTRON_ENABLE_LOGGING",
+        "CHROME_CRASHPAD_PIPE_NAME", "dstorage_force_gpu_decompression", "dstorage_disable_builtin_telemetry",
+        "dstorage_disable_legacy_file_io", "SDL_HINT_WINDOWS_DISABLE_THREAD_NAMING", "SDL_JOYSTICK_DISABLE_HIDAPI",
+        "UNITY_MULTITHREADED_RENDERING", "UNITY_DISABLE_TELEMETRY", "MALLOC_CONF"
+    )
+    Apply-Tweak "Откат игровых переменных среды (Режим ИИ)" {
+        foreach ($v in $GameEnvVarsToRemove) {
+            [Environment]::SetEnvironmentVariable($v, $null, "Machine")
+        }
+    }
+    $GraphicsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Graphics"
+    if (Test-Path $GraphicsPolicy) {
+        Apply-Tweak "Откат политик AutoSR и DirectSR (Режим ИИ)" {
+            Remove-ItemProperty -Path $GraphicsPolicy -Name "DisableAutoSR" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+            Remove-ItemProperty -Path $GraphicsPolicy -Name "DisableDirectSRTelemetry" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        }
+    }
 }
 
 # Принудительное включение вычислений формата TF32 для видеокарт NVIDIA. Ускоряет генерацию DLSS-кадров на ~30%.
@@ -16018,21 +16430,22 @@ Write-Host "====================================================================
 Write-Host "РАЗДЕЛ 76: ZERO-STUTTER I/O & BUS OPTIMIZATION (АППАРАТНЫЙ СОН И ЗАДЕРЖКИ)" -ForegroundColor Cyan
 Write-Host "==============================================================================" -ForegroundColor DarkGray
 
-# Глубокое отключение сна для звуковых карт (Устранение заиканий звука)
+# Прямой откат настроек класса аудиоустройств 4d36e96c от предыдущего запуска
 $AudioClass = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e96c-e325-11ce-bfc1-08002be10318}"
-Apply-Tweak "Захват прав на класс аудиоустройств" { Grant-RegPermission -RegPath $AudioClass } # Взлом класса
+Apply-Tweak "Захват прав на класс аудиоустройств" { Grant-RegPermission -RegPath $AudioClass }
 $AudioDevices = Get-SafeClassAdapters -ClassPath $AudioClass
 foreach ($Dev in $AudioDevices) {
     $PowerKey = "$($Dev.PSPath)\PowerSettings"
     if (Test-Path -LiteralPath $PowerKey) {
         Apply-Tweak "Захват прав на настройки питания аудиоустройства" { Grant-RegPermission -RegPath $PowerKey }
-        if ($global:OptHwSleep) {
-            # По документации Microsoft WDK PortCls: 00 00 00 00 отключает таймер сна
-            Apply-Tweak "Отключение сна звука от сети (ConservationIdleTime=0)" { Set-ItemProperty -LiteralPath $PowerKey -Name "ConservationIdleTime" -Value ([byte[]](0x00,0x00,0x00,0x00)) -Type Binary -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            Apply-Tweak "Отключение сна звука от батареи (PerformanceIdleTime=0)" { Set-ItemProperty -LiteralPath $PowerKey -Name "PerformanceIdleTime" -Value ([byte[]](0x00,0x00,0x00,0x00)) -Type Binary -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        $cit = (Get-ItemProperty -LiteralPath $PowerKey -Name "ConservationIdleTime" -ErrorAction SilentlyContinue).ConservationIdleTime
+        if ($cit -is [byte[]] -and ($cit -join ',') -eq '0,0,0,0') {
+            Apply-Tweak "Откат обнуления ConservationIdleTime" { Remove-ItemProperty -LiteralPath $PowerKey -Name "ConservationIdleTime" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
         }
-        # IdlePowerState обязан быть 03 00 00 00 (D3) в любом режиме, иначе при выключении ресивера происходит BSOD!
-        Apply-Tweak "Валидное состояние D3 для аудиодрайвера (IdlePowerState=3)" { Set-ItemProperty -LiteralPath $PowerKey -Name "IdlePowerState" -Value ([byte[]](0x03,0x00,0x00,0x00)) -Type Binary -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        $pit = (Get-ItemProperty -LiteralPath $PowerKey -Name "PerformanceIdleTime" -ErrorAction SilentlyContinue).PerformanceIdleTime
+        if ($pit -is [byte[]] -and ($pit -join ',') -eq '0,0,0,0') {
+            Apply-Tweak "Откат обнуления PerformanceIdleTime" { Remove-ItemProperty -LiteralPath $PowerKey -Name "PerformanceIdleTime" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        }
         Apply-Tweak "Возврат прав на настройки питания аудиоустройства" { Restore-RegPermission -RegPath $PowerKey }
     }
 }
@@ -16041,14 +16454,18 @@ if ($global:OptHwSleep) {
     $StorPort = "HKLM:\SYSTEM\CurrentControlSet\Control\StorPort"
     if (!(Test-Path $StorPort)) { Apply-Tweak "Создание раздела StorPort" { New-Item -Path $StorPort -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
     Apply-Tweak "Жесткий запрет StorPort усыплять диски (EnableIdlePowerManagement)" { Set-ItemProperty -Path $StorPort -Name "EnableIdlePowerManagement" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+} else {
+    $StorPort = "HKLM:\SYSTEM\CurrentControlSet\Control\StorPort"
+    if (Test-Path $StorPort) {
+        Apply-Tweak "Откат запрета сна StorPort (EnableIdlePowerManagement)" { Remove-ItemProperty -Path $StorPort -Name "EnableIdlePowerManagement" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    }
 }
 
-# Изоляция прерываний USB Audio ЦАП / Внешних звуковых карт (Убирает хрипы USB-наушников)
 $AudioDevices = Get-SafeClassAdapters -ClassPath $AudioClass
 foreach ($Dev in $AudioDevices) {
     Apply-Tweak "Захват прав на аудиоустройство" { Grant-RegPermission -RegPath $Dev.PSPath }
-    Apply-Tweak "Снятие лимитов аудио-буфера (BypassAudioRoutings)" { Set-ItemProperty -LiteralPath $Dev.PSPath -Name "BypassAudioRoutings" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Снимаем любые программные лимиты на размер аудио-буфера в драйвере системной шины
-    Apply-Tweak "Отключение энергосбережения аудио ЦАПа (DisablePowerManagement)" { Set-ItemProperty -LiteralPath $Dev.PSPath -Name "DisablePowerManagement" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Отключаем энергосбережение ЦАПа
+    Apply-Tweak "Откат BypassAudioRoutings" { Remove-ItemProperty -LiteralPath $Dev.PSPath -Name "BypassAudioRoutings" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Откат DisablePowerManagement" { Remove-ItemProperty -LiteralPath $Dev.PSPath -Name "DisablePowerManagement" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     Apply-Tweak "Возврат прав на аудиоустройство" { Restore-RegPermission -RegPath $Dev.PSPath }
 }
 Apply-Tweak "Возврат прав на класс аудиоустройств" { Restore-RegPermission -RegPath $AudioClass }
@@ -16211,7 +16628,7 @@ foreach ($Log in $EventLogs) {
 
 Apply-Tweak "Пакетная очистка системных журналов событий" { 
     # wevtutil el читает список каналов напрямую без блокировки объекта сессии RPC
-    cmd.exe /c "for /F `"tokens=*`" %1 in ('wevtutil.exe el') do wevtutil.exe cl `"%1`" >nul 2>&1"
+    cmd.exe /c "@for /F `"tokens=*`" %1 in ('wevtutil.exe el') do @wevtutil.exe cl `"%1`" >nul 2>&1" | Out-Null
     $global:LASTEXITCODE = 0 
 }
 
