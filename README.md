@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Windows](https://img.shields.io/badge/OS-Windows%2010%20%7C%2011-blue?logo=windows)](#)
 [![PowerShell](https://img.shields.io/badge/Script-PowerShell-1f425f.svg?logo=powershell)](#)
-[![Version](https://img.shields.io/badge/Version-1.0.2-success.svg)](#)
+[![Version](https://img.shields.io/badge/Version-1.0.3-success.svg)](#)
 
 [🇷🇺 Русский](#ru-русский) | [🇬🇧 English](#en-english)
 
