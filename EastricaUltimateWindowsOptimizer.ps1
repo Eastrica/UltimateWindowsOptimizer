@@ -498,36 +498,41 @@ public static class CpuTopologyHelper {
 # Авто-обновление скрипта (Eastrica Ultimate Windows Optimizer)
 # ==============================================================================
 # Замените ссылки на ваш реальный репозитории GitHub
-$CurrentVersion = "1.0.3"
+$CurrentVersion = "1.0.4"
 $VersionUrl = "https://raw.githubusercontent.com/Eastrica/UltimateWindowsOptimizer/main/version.txt"
 $ScriptUrl = "https://raw.githubusercontent.com/Eastrica/UltimateWindowsOptimizer/main/EastricaUltimateWindowsOptimizer.ps1"
 
-try {
-    Write-Host ""
-    Write-Host " ► Проверка обновлений скрипта..." -ForegroundColor DarkGray
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $LatestVersion = (Invoke-RestMethod -Uri $VersionUrl -TimeoutSec 3 -ErrorAction Stop).Trim()
-    
-    if ([version]$LatestVersion -gt [version]$CurrentVersion) {
+# В автономном режиме (-Unattended / Builder Mode) не перезаписываем зашитую в autounattend.xml конфигурацию версией с GitHub
+if (-not $Unattended) {
+    try {
         Write-Host ""
-        Write-Host "[!] Найдена новая версия скрипта: $LatestVersion (Текущая: $CurrentVersion)" -ForegroundColor Green
-        Write-Host " ► Скачивание обновления..." -ForegroundColor DarkGray
+        Write-Host " ► Проверка обновлений скрипта..." -ForegroundColor DarkGray
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $LatestVersion = (Invoke-RestMethod -Uri $VersionUrl -TimeoutSec 3 -ErrorAction Stop).Trim()
         
-        $UpdatePath = "$env:TEMP\EastricaOptimizer_v$LatestVersion.ps1"
-        Invoke-WebRequest -Uri $ScriptUrl -OutFile $UpdatePath -UseBasicParsing -ErrorAction Stop
-        
-        if (Test-Path $UpdatePath) {
-            Write-Host "[OK] Скрипт обновлен! Перезапуск новой версии..." -ForegroundColor Green
-            # Сохраняем флаг -Unattended, если текущая сессия была запущена в автоматическом режиме
-            $extraArgs = if ($Unattended) { " -Unattended" } else { "" }
-            Start-Process -FilePath $WindowsPowerShell -ArgumentList "-NoProfile -STA -ExecutionPolicy Bypass -File `"$UpdatePath`"$extraArgs" -Verb RunAs
-            Exit
+        if ([version]$LatestVersion -gt [version]$CurrentVersion) {
+            Write-Host ""
+            Write-Host "[!] Найдена новая версия скрипта: $LatestVersion (Текущая: $CurrentVersion)" -ForegroundColor Green
+            Write-Host " ► Скачивание обновления..." -ForegroundColor DarkGray
+            
+            $UpdatePath = "$env:TEMP\EastricaOptimizer_v$LatestVersion.ps1"
+            Invoke-WebRequest -Uri $ScriptUrl -OutFile $UpdatePath -UseBasicParsing -ErrorAction Stop
+            
+            if (Test-Path $UpdatePath) {
+                Write-Host "[OK] Скрипт обновлен! Перезапуск новой версии..." -ForegroundColor Green
+                # Сохраняем флаг -Unattended, если текущая сессия была запущена в автоматическом режиме
+                $extraArgs = if ($Unattended) { " -Unattended" } else { "" }
+                Start-Process -FilePath $WindowsPowerShell -ArgumentList "-NoProfile -STA -ExecutionPolicy Bypass -File `"$UpdatePath`"$extraArgs" -Verb RunAs
+                Exit
+            }
+        } else {
+            Write-Host " ► У вас установлена последняя версия скрипта ($CurrentVersion)." -ForegroundColor DarkGray
         }
-    } else {
-        Write-Host " ► У вас установлена последняя версия скрипта ($CurrentVersion)." -ForegroundColor DarkGray
+    } catch {
+        Write-Host " ► Проверка обновлений пропущена (нет связи с сервером или неверная ссылка)." -ForegroundColor DarkGray
     }
-} catch {
-    Write-Host " ► Проверка обновлений пропущена (нет связи с сервером или неверная ссылка)." -ForegroundColor DarkGray
+} else {
+    Write-Host " ► Проверка обновлений пропущена (автономный режим -Unattended)." -ForegroundColor DarkGray
 }
 
 Write-Host ""
@@ -620,6 +625,11 @@ function ConvertTo-RegistryRestoreCommand {
     $quotedPath = $Path.Replace("'", "''")
     $quotedName = $Name.Replace("'", "''")
     if (-not $Exists) {
+        if ($Name -eq '(default)') {
+            # Remove-ItemProperty не удаляет безымянное значение '(default)' в провайдере реестра PowerShell,
+            # поэтому при откате удаляем его напрямую через .NET RegistryKey.DeleteValue('', $false)
+            return "if (Test-Path -LiteralPath '$quotedPath') { `$k = Get-Item -LiteralPath '$quotedPath' -ErrorAction SilentlyContinue; if (`$null -ne `$k) { try { `$rk = `$k.OpenSubKey('', `$true); if (`$null -ne `$rk) { `$rk.DeleteValue('', `$false); `$rk.Close() } } catch {} finally { `$k.Close() } } }"
+        }
         return "Microsoft.PowerShell.Management\Remove-ItemProperty -LiteralPath '$quotedPath' -Name '$quotedName' -Force -ErrorAction SilentlyContinue"
     }
     
@@ -692,7 +702,8 @@ function Set-ItemProperty {
     [CmdletBinding()]
     param([Parameter(Position=0, ValueFromPipelineByPropertyName=$true)] [Alias('PSPath')] [string[]]$Path, [Parameter(ValueFromPipelineByPropertyName=$true)] [Alias('LP')] [string[]]$LiteralPath, [Parameter(Position=1, Mandatory=$true)] [string]$Name, [Parameter(Position=2)] [Object]$Value, [switch]$Force, [string]$Type)
     process {
-        $errAction = if ($PSBoundParameters.ContainsKey('ErrorAction')) { $PSBoundParameters['ErrorAction'] } else { 'SilentlyContinue' }
+        # Если -ErrorAction не передан явно, наследуем $ErrorActionPreference (внутри Apply-Tweak это 'Stop')
+        $errAction = if ($PSBoundParameters.ContainsKey('ErrorAction')) { $PSBoundParameters['ErrorAction'] } else { $ErrorActionPreference }
         $targetPaths = if ($LiteralPath) { $LiteralPath } else { $Path }
         $changes = @()
         foreach ($p in $targetPaths) {
@@ -714,7 +725,8 @@ function Remove-ItemProperty {
     [CmdletBinding()]
     param([Parameter(Position=0, ValueFromPipelineByPropertyName=$true)][Alias('PSPath')][string[]]$Path, [Parameter(ValueFromPipelineByPropertyName=$true)][Alias('LP')][string[]]$LiteralPath, [Parameter(Position=1, Mandatory=$true)][string]$Name, [switch]$Force)
     process {
-        $errAction = if ($PSBoundParameters.ContainsKey('ErrorAction')) { $PSBoundParameters['ErrorAction'] } else { 'SilentlyContinue' }
+        # Если -ErrorAction не передан явно, наследуем $ErrorActionPreference (отсутствующие свойства уже отфильтрованы выше через $names -contains $nativeName)
+        $errAction = if ($PSBoundParameters.ContainsKey('ErrorAction')) { $PSBoundParameters['ErrorAction'] } else { $ErrorActionPreference }
         $targetPaths = if ($LiteralPath) { $LiteralPath } else { $Path }
         foreach ($p in $targetPaths) {
             if (-not (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue)) { continue }
@@ -744,7 +756,8 @@ function Set-Item {
         [switch]$Force
     )
     process {
-        $errAction = if ($PSBoundParameters.ContainsKey('ErrorAction')) { $PSBoundParameters['ErrorAction'] } else { 'SilentlyContinue' }
+        # Если -ErrorAction не передан явно, наследуем $ErrorActionPreference (внутри Apply-Tweak это 'Stop')
+        $errAction = if ($PSBoundParameters.ContainsKey('ErrorAction')) { $PSBoundParameters['ErrorAction'] } else { $ErrorActionPreference }
         $targetPaths = if ($LiteralPath) { $LiteralPath } else { $Path }
         foreach ($p in $targetPaths) {
             if ($p -match '^(HKLM:|HKCU:|HKCR:|Registry::)') {
@@ -1102,17 +1115,22 @@ function Apply-Tweak {
     $global:LASTEXITCODE = 0
     $script:EastricaStepNeedsReboot = $false
     $Error.Clear()
-    $psCmdSuccess = $true
-
+    
     try {
         & {
             $ErrorActionPreference = 'Stop'
-            # Принудительно зануляем переменную кода возврата перед исполнением блока
             $global:LASTEXITCODE = 0
+
             & $Cmd
-            $psCmdSuccess = $?
+            $commandSucceeded = $?
+
+            # Проверяем результат в том же блоке, где он получен.
+            # Ненулевые коды внешних программ разбирает существующая проверка ниже.
+            # В частности, она уже учитывает 3010 и 1641.
+            if (-not $commandSucceeded -and $global:LASTEXITCODE -eq 0) {
+                throw "Ошибка выполнения команды PowerShell"
+            }
         }
-        if (-not $psCmdSuccess) { throw "Ошибка выполнения команды PowerShell" }
         # Проверяем код возврата только если внутри блока реально вызывались внешние процессы (.exe)
         if ($null -ne $global:LASTEXITCODE -and $global:LASTEXITCODE -notin @(0, 3010, 1641)) { 
             throw "Внешний процесс завершился с ошибкой: $global:LASTEXITCODE" 
@@ -1247,19 +1265,27 @@ function Grant-RegPermission {
         # Рекурсивный проход с добавлением прав БЕЗ сброса существующих системных прав DACL
         function TakeOwnAndGrant ($currentSubKeyStr) {
             try {
-                # 524288 = WRITE_OWNER (захват владения разделом)
+                # Читаем исходного владельца отдельно с правом 131072 (READ_CONTROL)
+                try {
+                    $ReadOwnerKey = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, 131072)
+                    if ($ReadOwnerKey) {
+                        $OwnerAcl = $ReadOwnerKey.GetAccessControl(2)
+                        if (-not $global:OriginalRegOwners.ContainsKey("${Hive}:\$currentSubKeyStr")) { 
+                            $global:OriginalRegOwners["${Hive}:\$currentSubKeyStr"] = $OwnerAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value 
+                        }
+                        $ReadOwnerKey.Close()
+                    }
+                } catch {}
+                # 524288 = WRITE_OWNER; GetAccessControl(0) не требует READ_CONTROL
                 $Key = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, 524288)
                 if ($Key) {
-                    $Acl = $Key.GetAccessControl(2)
-                    if (-not $global:OriginalRegOwners.ContainsKey("${Hive}:\$currentSubKeyStr")) { 
-                        $global:OriginalRegOwners["${Hive}:\$currentSubKeyStr"] = $Acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value 
-                    }
+                    $Acl = $Key.GetAccessControl(0)
                     $Acl.SetOwner($AdminGroup)
                     $Key.SetAccessControl($Acl)
                     $Key.Close()
                 }
-                # 262144 = WRITE_DAC (изменение списка управления доступом)
-                $Key = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, 262144)
+                # 393216 = WRITE_DAC (262144) | READ_CONTROL (131072) для чтения и изменения DACL
+                $Key = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, 393216)
                 if ($Key) {
                     $Acl = $Key.GetAccessControl(1)
                     # 983103 = FullControl; 3 = ContainerInherit | ObjectInherit; 0 = None; 0 = Allow
@@ -1283,7 +1309,8 @@ function Grant-RegPermission {
     } catch { }
 }
 
-function Restore-RegPermission {
+# Глобальная область видимости нужна для вызова из изолированного блока Register-EngineEvent (PowerShell.Exiting)
+function global:Restore-RegPermission {
     param([string]$RegPath)
     try {
         # Очищаем путь от префиксов провайдера PowerShell и приводим к стандартному виду (HKLM:\, HKCU:\, HKCR:\)
@@ -1310,10 +1337,10 @@ function Restore-RegPermission {
                     foreach ($sk in $SubKeys) { RestoreOwnRecursive "$currentSubKeyStr\$sk" }
                 }
 
-                # 524288 = TakeOwnership (Право смены владельца ветки реестра)
+                # 524288 = TakeOwnership; GetAccessControl(0) не требует READ_CONTROL
                 $Key = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, 524288)
                 if ($Key) {
-                    $Acl = $Key.GetAccessControl(2) # 2 = AccessControlSections.Owner
+                    $Acl = $Key.GetAccessControl(0) # 0 = AccessControlSections.None
                     $FullKeyName = "${Hive}:\$currentSubKeyStr"
                     $OwnerSID = $FallbackSID
                     
@@ -2235,13 +2262,21 @@ $btnBuilder.Add_Click({
         $val = if ($checkBoxes[$key].Checked) { "`$true" } else { "`$false" }
         # Формируем строку инициализации состояния чекбокса для автономного режима
         $chkInitLines += "`$checkBoxes[`"$key`"].Checked = $val`r`n"
-        # Регулярное выражение для поиска строки присвоения глобальной переменной опции в Разделе 6
-        $pattern = '\$global:Opt' + $varName + '\s*=\s*\$checkBoxes\["' + $key + '"\]\.Checked'
         # Экранируем знак доллара удвоением ($$) для .NET Regex-движка оператора -replace, чтобы он не интерпретировал $global и $true как именованные группы захвата
         $replacementVal = if ($checkBoxes[$key].Checked) { '$$true' } else { '$$false' }
-        $ScriptContent = $ScriptContent -replace $pattern, ('$$global:Opt' + $varName + ' = ' + $replacementVal)
+        if ($varName -eq "HwSleep") {
+            # Отдельный шаблон для OptHwSleep, так как в Разделе 6 он обёрнут в проверку $global:IsARM64
+            $pattern = '\$global:OptHwSleep\s*=\s*if\s*\(\$global:IsARM64\)\s*\{\s*\$false\s*\}\s*else\s*\{\s*\$checkBoxes\["HwSleep"\]\.Checked\s*\}'
+            $ScriptContent = $ScriptContent -replace $pattern, ('$$global:OptHwSleep = if ($$global:IsARM64) { $$false } else { ' + $replacementVal + ' }')
+        } else {
+            # Регулярное выражение для поиска строки присвоения глобальной переменной опции в Разделе 6
+            $pattern = '\$global:Opt' + $varName + '\s*=\s*\$checkBoxes\["' + $key + '"\]\.Checked'
+            $ScriptContent = $ScriptContent -replace $pattern, ('$$global:Opt' + $varName + ' = ' + $replacementVal)
+        }
     }
-    $ScriptContent = $ScriptContent.Replace('$result = [System.Windows.Forms.DialogResult]::OK', $chkInitLines + '$result = [System.Windows.Forms.DialogResult]::OK')
+    # Вставляем инициализацию чекбоксов ДО ветки if ($Unattended), чтобы она выполнялась и в режиме -Unattended
+    $escapedInit = $chkInitLines.Replace('$', '$$')
+    $ScriptContent = $ScriptContent -replace '(?m)^if \(\$Unattended\) \{(\r?\n\s*\$result\s*=\s*\[System\.Windows\.Forms\.DialogResult\]::OK)', ($escapedInit + 'if ($$Unattended) {$1')
     $ScriptContent = $ScriptContent -replace '(?m)^\s*\$GamePaths\s*=\s*Show-FileDialog-STA.*', '$$GamePaths = @()'
     $ScriptContent = $ScriptContent -replace '(?m)^\s*\$FolderPath\s*=\s*Show-FolderBrowser-STA.*', '$$FolderPath = $$null'
     $ScriptContent = $ScriptContent -replace '(?m)^\s*\$CustomAIFiles\s*=\s*Show-FileDialog-STA.*', '$$CustomAIFiles = @()'
@@ -2439,6 +2474,10 @@ if ($global:OptAI -and $global:OptVBS) { # Защита от дурака: ИИ 
     Write-Warning "► Отключение виртуализации (VBS и Hyper-V) принудительно отменено"
     $global:ForceEnableVBS = $true # Флаг на принудительное включение VBS
     $global:OptVBS = $false # Снимаем галочку отключения
+} elseif ($global:OptAntiCheat -and $global:OptVBS) { # FACEIT AC и Vanguard на Win 11 могут требовать VBS / HVCI (Memory Integrity)
+    Write-Warning "[WARNING] Включен режим совместимости с античитами (FACEIT / Vanguard)."
+    Write-Warning "► Отключение VBS, HVCI и гипервизора принудительно отменено во избежание блокировки запуска игр"
+    $global:OptVBS = $false # Запрещаем отключение VBS, Memory Integrity, RunAsPPL и гипервизора в Разделе 10
 }
 
 # Флаг: нужна ли системе виртуализация? (Да, если ИИ включен, либо пользователь НЕ отключал VBS)
@@ -2801,7 +2840,8 @@ if ($GPU_Adapters) {
 # Экспорт и добавление отката аппаратных прерываний MSI для USB-контроллеров
 if ($USB_Controllers) {
     foreach ($usb in $USB_Controllers) {
-        if ($usb.Name -match "xHCI|3\.0|3\.1" -and $usb.PNPDeviceID) {
+        # Учитываем контроллеры USB 3.2, USB4 и русскую локализацию Windows («Расширяемый...»)
+        if ($usb.Name -match "xHCI|3\.0|3\.1|3\.2|USB4|Расширяемый|eXtensible" -and $usb.PNPDeviceID) {
             $UsbCleanName = Clean-FileName -Name $usb.Name
             $PnpID = $usb.PNPDeviceID
             $RegPathCMD = "HKLM\SYSTEM\CurrentControlSet\Enum\$PnpID\Device Parameters\Interrupt Management"
@@ -2874,7 +2914,7 @@ Add-Content -Path $RestoreScript -Value $ClsidCleanupCmd -Encoding Default
 # ЭТАП 8: Очистка всех переменных среды (игровых + ИИ), задач, правил Брандмауэра, политик QoS, SafeBoot/NVMe и контекстных меню
 Add-Content -Path $RestoreScript -Value "echo." -Encoding Default
 Add-Content -Path $RestoreScript -Value "echo [8/8] Очистка системных переменных, задач, QoS и меню..." -Encoding Default
-$FinalCleanupCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$vars = @(''__GL_THREADED_OPTIMIZATIONS'',''__GL_SYNC_TO_VBLANK'',''__GL_MaxFramesAllowed'',''DXVK_STATE_CACHE'',''DXVK_ENABLE_NVAPI'',''DXVK_LOG_LEVEL'',''__GL_SHADER_DISK_CACHE'',''__GL_SHADER_DISK_CACHE_SIZE'',''__GL_SHADER_DISK_CACHE_SKIP_CLEANUP'',''D3D_DISABLE_SHADER_CACHE_DELETION'',''D3D_SHADER_CACHE_SIZE'',''NVIDIA_TF32_OVERRIDE'',''NODE_OPTIONS'',''DXSDK_DIR'',''POWERSHELL_TELEMETRY_OPTOUT'',''DOTNET_CLI_TELEMETRY_OPTOUT'',''DOTNET_TieredPGO'',''ELECTRON_DISABLE_SECURITY_WARNINGS'',''ELECTRON_ENABLE_LOGGING'',''CHROME_CRASHPAD_PIPE_NAME'',''SDL_HINT_WINDOWS_DISABLE_THREAD_NAMING'',''KMP_BLOCKTIME'',''MALLOC_CONF'',''D3D11_ENABLE_PRESENT_ON_MULTIPLE_MONITORS'',''AMD_ENABLE_LLVM_MULTITHREADING'',''AMD_DISABLE_MULTI_THREAD_SUBMIT'',''OLLAMA_KV_CACHE_TYPE'',''CUDA_MANAGED_FORCE_DEVICE_ALLOC'',''TORCH_NCCL_BLOCKING_WAIT'',''MKL_DEBUG_CPU_TYPE'',''MKL_ENABLE_INSTRUCTIONS'',''KMP_WARNINGS'',''PYTORCH_CUDA_ALLOC_CONF'',''KMP_DUPLICATE_LIB_OK'',''DISTUTILS_USE_SDK'',''HF_HUB_HTTP_RETRIES'',''CUDA_MODULE_LOADING'',''TORCH_CUDNN_V8_API_ENABLED'',''CUDA_CACHE_MAXSIZE'',''HF_HUB_DOWNLOAD_TIMEOUT'',''HF_HUB_ETAG_TIMEOUT'',''TORCH_COMPILE_DEBUG'',''TORCH_LOGS'',''GGML_VK_VISIBLE_DEVICES'',''GGML_VK_FORCE_MAX_ALLOCATION'',''DML_VISIBLE_DEVICES'',''GPU_MAX_ALLOC_PERCENT'',''HIP_FORCE_DEV_KERNARG'',''OMP_NUM_THREADS'',''KMP_AFFINITY'',''GGML_CUDA_ENABLE_UNIFIED_MEMORY'',''OMP_WAIT_POLICY'',''OMP_PROC_BIND'',''CUDA_DEVICE_MAX_CONNECTIONS'',''OLLAMA_FLASH_ATTENTION'',''OLLAMA_NUM_PARALLEL'',''XFORMERS_FORCE_DISABLE_TRITON'',''RAY_DISABLE_TELEMETRY'',''HF_HUB_DISABLE_SYMLINKS_WARNING'',''CUDA_CACHE_PATH'',''CUDA_ENABLE_COREDUMP_ON_EXCEPTION'',''OPENCV_LOG_LEVEL'',''CUDA_DEVICE_DEFAULT_PERSISTING_L2_CACHE_PERCENTAGE'',''CUDA_DEVICE_ORDER'',''NCCL_P2P_DISABLE'',''NCCL_P2P_LEVEL'',''NCCL_NET_GDR_LEVEL'',''NCCL_IB_DISABLE'',''TORCHINDUCTOR_CACHE_DIR'',''NINJA_FLAGS'',''MAX_JOBS'',''SAFETENSORS_FAST_GPU'',''HF_HUB_ENABLE_HF_TRANSFER'',''PYTHONUNBUFFERED'',''HF_HUB_DISABLE_TELEMETRY'',''GRADIO_ANALYTICS_ENABLED'',''DO_NOT_TRACK'',''ANONYMIZED_TELEMETRY'',''DISABLE_TELEMETRY'',''ORT_TENSORRT_FP16_ENABLE'',''ORT_TENSORRT_ENGINE_CACHE_ENABLE'',''PIP_NO_CACHE_DIR'',''PIP_DISABLE_PIP_VERSION_CHECK'',''OMP_MAX_ACTIVE_LEVELS'',''TF_ENABLE_ONEDNN_OPTS'',''BITSANDBYTES_NOWELCOME'',''TORCH_CUDNN_SDPA_ENABLED'',''UV_LINK_MODE'',''UV_CACHE_DIR'',''TOKENIZERS_PARALLELISM'',''CUBLAS_WORKSPACE_CONFIG'',''CUDNN_FRONTEND_NOTELEMETRY'',''OLLAMA_HOST'',''TORCH_EXTENSIONS_DIR'',''TRITON_CACHE_DIR''); foreach ($v in $vars) { [Environment]::SetEnvironmentVariable($v, $null, ''Machine'') }; Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match ''^Eastrica_'' } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue; Remove-NetFirewallRule -DisplayName ''Eastrica_*'' -ErrorAction SilentlyContinue; Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -match ''^Eastrica_'' } | Remove-NetQosPolicy -Confirm:$false -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\EastricaTools'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\EastricaToolsExtra'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\exefile\shell\EastricaThreadDirectorLaunch'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\lnkfile\shell\EastricaThreadDirectorLaunch'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\exefile\shell\EastricaToggleFirewall'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SOFTWARE\Eastrica'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKCU:\Software\Eastrica'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\nvmedisk'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Network\nvmedisk'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{75416E63-5912-4DFA-AE8F-3EFACCAFFB14}'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{75416E63-5912-4DFA-AE8F-3EFACCAFFB14}'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path $env:SystemDrive ''EastricaTools\Scripts\FastMem.dll'') -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path $env:SystemDrive ''EastricaTools\Scripts\EastricaDirectorCore.dll'') -Force -ErrorAction SilentlyContinue"' -replace "''", "'"
+$FinalCleanupCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$vars = @(''__GL_THREADED_OPTIMIZATIONS'',''__GL_SYNC_TO_VBLANK'',''__GL_MaxFramesAllowed'',''DXVK_STATE_CACHE'',''DXVK_ENABLE_NVAPI'',''DXVK_LOG_LEVEL'',''__GL_SHADER_DISK_CACHE'',''__GL_SHADER_DISK_CACHE_SIZE'',''__GL_SHADER_DISK_CACHE_SKIP_CLEANUP'',''D3D_DISABLE_SHADER_CACHE_DELETION'',''D3D_SHADER_CACHE_SIZE'',''NVIDIA_TF32_OVERRIDE'',''NODE_OPTIONS'',''DXSDK_DIR'',''POWERSHELL_TELEMETRY_OPTOUT'',''DOTNET_CLI_TELEMETRY_OPTOUT'',''DOTNET_TieredPGO'',''ELECTRON_DISABLE_SECURITY_WARNINGS'',''ELECTRON_ENABLE_LOGGING'',''CHROME_CRASHPAD_PIPE_NAME'',''SDL_HINT_WINDOWS_DISABLE_THREAD_NAMING'',''KMP_BLOCKTIME'',''MALLOC_CONF'',''D3D11_ENABLE_PRESENT_ON_MULTIPLE_MONITORS'',''AMD_ENABLE_LLVM_MULTITHREADING'',''AMD_DISABLE_MULTI_THREAD_SUBMIT'',''OLLAMA_KV_CACHE_TYPE'',''CUDA_MANAGED_FORCE_DEVICE_ALLOC'',''TORCH_NCCL_BLOCKING_WAIT'',''MKL_DEBUG_CPU_TYPE'',''MKL_ENABLE_INSTRUCTIONS'',''KMP_WARNINGS'',''PYTORCH_CUDA_ALLOC_CONF'',''KMP_DUPLICATE_LIB_OK'',''DISTUTILS_USE_SDK'',''HF_HUB_HTTP_RETRIES'',''CUDA_MODULE_LOADING'',''TORCH_CUDNN_V8_API_ENABLED'',''CUDA_CACHE_MAXSIZE'',''HF_HUB_DOWNLOAD_TIMEOUT'',''HF_HUB_ETAG_TIMEOUT'',''TORCH_COMPILE_DEBUG'',''TORCH_LOGS'',''GGML_VK_VISIBLE_DEVICES'',''GGML_VK_FORCE_MAX_ALLOCATION'',''DML_VISIBLE_DEVICES'',''GPU_MAX_ALLOC_PERCENT'',''HIP_FORCE_DEV_KERNARG'',''OMP_NUM_THREADS'',''KMP_AFFINITY'',''GGML_CUDA_ENABLE_UNIFIED_MEMORY'',''OMP_WAIT_POLICY'',''OMP_PROC_BIND'',''CUDA_DEVICE_MAX_CONNECTIONS'',''OLLAMA_FLASH_ATTENTION'',''OLLAMA_NUM_PARALLEL'',''XFORMERS_FORCE_DISABLE_TRITON'',''RAY_DISABLE_TELEMETRY'',''HF_HUB_DISABLE_SYMLINKS_WARNING'',''CUDA_CACHE_PATH'',''CUDA_ENABLE_COREDUMP_ON_EXCEPTION'',''OPENCV_LOG_LEVEL'',''CUDA_DEVICE_DEFAULT_PERSISTING_L2_CACHE_PERCENTAGE'',''CUDA_DEVICE_ORDER'',''NCCL_P2P_DISABLE'',''NCCL_P2P_LEVEL'',''NCCL_NET_GDR_LEVEL'',''NCCL_IB_DISABLE'',''TORCHINDUCTOR_CACHE_DIR'',''NINJA_FLAGS'',''MAX_JOBS'',''SAFETENSORS_FAST_GPU'',''HF_HUB_ENABLE_HF_TRANSFER'',''PYTHONUNBUFFERED'',''HF_HUB_DISABLE_TELEMETRY'',''GRADIO_ANALYTICS_ENABLED'',''DO_NOT_TRACK'',''ANONYMIZED_TELEMETRY'',''DISABLE_TELEMETRY'',''ORT_TENSORRT_FP16_ENABLE'',''ORT_TENSORRT_ENGINE_CACHE_ENABLE'',''PIP_NO_CACHE_DIR'',''PIP_DISABLE_PIP_VERSION_CHECK'',''OMP_MAX_ACTIVE_LEVELS'',''TF_ENABLE_ONEDNN_OPTS'',''BITSANDBYTES_NOWELCOME'',''TORCH_CUDNN_SDPA_ENABLED'',''UV_LINK_MODE'',''UV_CACHE_DIR'',''TOKENIZERS_PARALLELISM'',''CUBLAS_WORKSPACE_CONFIG'',''CUDNN_FRONTEND_NOTELEMETRY'',''OLLAMA_HOST'',''TORCH_EXTENSIONS_DIR'',''TRITON_CACHE_DIR''); foreach ($v in $vars) { [Environment]::SetEnvironmentVariable($v, $null, ''Machine'') }; Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match ''^Eastrica_'' } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue; Remove-NetFirewallRule -DisplayName ''Eastrica_*'' -ErrorAction SilentlyContinue; Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -match ''^Eastrica_'' } | Remove-NetQosPolicy -Confirm:$false -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\EastricaTools'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\EastricaToolsExtra'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\exefile\shell\EastricaThreadDirectorLaunch'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\lnkfile\shell\EastricaThreadDirectorLaunch'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''Registry::HKEY_CLASSES_ROOT\exefile\shell\EastricaToggleFirewall'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SOFTWARE\Eastrica'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKCU:\Software\Eastrica'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\nvmedisk'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Network\nvmedisk'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{75416E63-5912-4DFA-AE8F-3EFACCAFFB14}'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ''HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{75416E63-5912-4DFA-AE8F-3EFACCAFFB14}'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path $env:SystemDrive ''EastricaTools\Scripts\FastMem.dll'') -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path $env:SystemDrive ''EastricaTools\Scripts\EastricaDirectorCore.dll'') -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path $env:SystemDrive ''EastricaTools\Scripts\EastricaDirectorCore_AffinityStatus.dll'') -Force -ErrorAction SilentlyContinue"' -replace "''", "'"
 Add-Content -Path $RestoreScript -Value $FinalCleanupCmd -Encoding Default
 
 # Финал: Вывод успешного статуса и запрос перезагрузки
@@ -2986,6 +3026,144 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 }
 Write-Host "Запуск точечного возврата изменений реестра..." -ForegroundColor Cyan
 if (!(Get-PSDrive -Name HKCR -ErrorAction SilentlyContinue)) { New-PSDrive -Name HKCR -PSProvider Registry -Root HKEY_CLASSES_ROOT | Out-Null }
+
+# Активируем привилегии захвата владельца и восстановления для возврата ключей, принадлежащих SYSTEM / TrustedInstaller
+if (-not ("RollbackTokenManipulator" -as [type])) {
+    Add-Type -TypeDefinition @"
+    using System;
+    using System.Runtime.InteropServices;
+    public class RollbackTokenManipulator {
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+        internal static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+        internal static extern bool OpenProcessToken(IntPtr h, int acc, ref IntPtr phtok);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        internal static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        internal static extern bool CloseHandle(IntPtr h);
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        internal struct TokPriv1Luid { public int Count; public long Luid; public int Attr; }
+        public static void AddPrivilege(string privilege) {
+            IntPtr hproc = System.Diagnostics.Process.GetCurrentProcess().Handle;
+            IntPtr htok = IntPtr.Zero;
+            OpenProcessToken(hproc, 0x00000020 | 0x00000008, ref htok);
+            TokPriv1Luid tp = new TokPriv1Luid();
+            tp.Count = 1; tp.Luid = 0; tp.Attr = 0x00000002;
+            LookupPrivilegeValue(null, privilege, ref tp.Luid);
+            AdjustTokenPrivileges(htok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+            CloseHandle(htok);
+        }
+    }
+"@ -Language CSharp -ErrorAction SilentlyContinue
+}
+try {
+    [RollbackTokenManipulator]::AddPrivilege("SeTakeOwnershipPrivilege")
+    [RollbackTokenManipulator]::AddPrivilege("SeRestorePrivilege")
+} catch {}
+
+$script:RollbackRegOwners = @{}
+function Grant-RollbackRegPermission {
+    param([string]$RegPath)
+    try {
+        $CleanPath = $RegPath -replace '^.*::HKEY_LOCAL_MACHINE\\?', 'HKLM:\' -replace '^.*::HKEY_CURRENT_USER\\?', 'HKCU:\' -replace '^.*::HKEY_CLASSES_ROOT\\?', 'HKCR:\' -replace '^.*::', ''
+        while ($CleanPath -and -not (Test-Path -LiteralPath $CleanPath -ErrorAction SilentlyContinue)) {
+            $CleanPath = Split-Path -Path $CleanPath -Parent
+        }
+        if (-not $CleanPath) { return }
+        $Hive, $SubKey = $CleanPath -split ':\\', 2
+        switch ($Hive) {
+            "HKLM" { $RegistryHive = [Microsoft.Win32.RegistryHive]::LocalMachine }
+            "HKCU" { $RegistryHive = [Microsoft.Win32.RegistryHive]::CurrentUser }
+            "HKCR" { $RegistryHive = [Microsoft.Win32.RegistryHive]::ClassesRoot }
+            default { return }
+        }
+        $BaseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($RegistryHive, [Microsoft.Win32.RegistryView]::Default)
+        $AdminGroup = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
+        function TakeOwnAndGrant ($currentSubKeyStr) {
+            try {
+                try {
+                    $ReadOwnerKey = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, 131072)
+                    if ($ReadOwnerKey) {
+                        $OwnerAcl = $ReadOwnerKey.GetAccessControl(2)
+                        if (-not $script:RollbackRegOwners.ContainsKey("${Hive}:\$currentSubKeyStr")) {
+                            $script:RollbackRegOwners["${Hive}:\$currentSubKeyStr"] = $OwnerAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+                        }
+                        $ReadOwnerKey.Close()
+                    }
+                } catch {}
+                $Key = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, 524288)
+                if ($Key) {
+                    $Acl = $Key.GetAccessControl(0)
+                    $Acl.SetOwner($AdminGroup)
+                    $Key.SetAccessControl($Acl)
+                    $Key.Close()
+                }
+                $Key = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, 393216)
+                if ($Key) {
+                    $Acl = $Key.GetAccessControl(1)
+                    $Rule = New-Object System.Security.AccessControl.RegistryAccessRule($AdminGroup, 983103, 3, 0, 0)
+                    $Acl.AddAccessRule($Rule)
+                    $Key.SetAccessControl($Acl)
+                    $Key.Close()
+                }
+                $Key = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, 131097)
+                if ($Key) {
+                    $SubKeys = $Key.GetSubKeyNames()
+                    $Key.Close()
+                    foreach ($sk in $SubKeys) { TakeOwnAndGrant "$currentSubKeyStr\$sk" }
+                }
+            } catch {}
+        }
+        TakeOwnAndGrant $SubKey
+        $BaseKey.Close()
+    } catch {}
+}
+
+function Restore-RollbackRegPermission {
+    param([string]$RegPath)
+    try {
+        $CleanPath = $RegPath -replace '^.*::HKEY_LOCAL_MACHINE\\?', 'HKLM:\' -replace '^.*::HKEY_CURRENT_USER\\?', 'HKCU:\' -replace '^.*::HKEY_CLASSES_ROOT\\?', 'HKCR:\' -replace '^.*::', ''
+        while ($CleanPath -and -not (Test-Path -LiteralPath $CleanPath -ErrorAction SilentlyContinue)) {
+            $CleanPath = Split-Path -Path $CleanPath -Parent
+        }
+        if (-not $CleanPath) { return }
+        $Hive, $SubKey = $CleanPath -split ':\\', 2
+        switch ($Hive) {
+            "HKLM" { $RegistryHive = [Microsoft.Win32.RegistryHive]::LocalMachine }
+            "HKCU" { $RegistryHive = [Microsoft.Win32.RegistryHive]::CurrentUser }
+            "HKCR" { $RegistryHive = [Microsoft.Win32.RegistryHive]::ClassesRoot }
+            default { return }
+        }
+        $BaseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($RegistryHive, [Microsoft.Win32.RegistryView]::Default)
+        $FallbackSID = if ($Hive -eq "HKLM") { "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464" } else { [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+        function RestoreOwnRecursive ($currentSubKeyStr) {
+            try {
+                $EnumKey = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, 131097)
+                if ($EnumKey) {
+                    $SubKeys = $EnumKey.GetSubKeyNames()
+                    $EnumKey.Close()
+                    foreach ($sk in $SubKeys) { RestoreOwnRecursive "$currentSubKeyStr\$sk" }
+                }
+                $Key = $BaseKey.OpenSubKey($currentSubKeyStr, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, 524288)
+                if ($Key) {
+                    $Acl = $Key.GetAccessControl(0)
+                    $FullKeyName = "${Hive}:\$currentSubKeyStr"
+                    $OwnerSID = $FallbackSID
+                    if ($script:RollbackRegOwners.ContainsKey($FullKeyName) -and -not [string]::IsNullOrWhiteSpace($script:RollbackRegOwners[$FullKeyName])) {
+                        $OwnerSID = $script:RollbackRegOwners[$FullKeyName]
+                    }
+                    $OriginalOwner = New-Object System.Security.Principal.SecurityIdentifier($OwnerSID)
+                    $Acl.SetOwner($OriginalOwner)
+                    $Key.SetAccessControl($Acl)
+                    $Key.Close()
+                }
+            } catch {}
+        }
+        RestoreOwnRecursive $SubKey
+        $BaseKey.Close()
+    } catch {}
+}
+
 $ErrorActionPreference = "SilentlyContinue"
 $SuccessCount = 0
 $FailCount = 0
@@ -2996,7 +3174,36 @@ $FailCount = 0
         [Array]::Reverse($HistoryLines)
         foreach ($Line in $HistoryLines) {
             if (-not [string]::IsNullOrWhiteSpace($Line) -and $Line -notmatch "^#") {
-                $WrappedLine = @"
+                # Определяем, относится ли строка отката к защищённой ветке SYSTEM / TrustedInstaller
+                $permTarget = $null
+                if ($Line -match "-LiteralPath '([^']+)'") {
+                    $regTarget = $matches[1]
+                    if ($regTarget -match '^(HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\.+?\\Device Parameters)(?:\\|$)') {
+                        $permTarget = $matches[1]
+                    } elseif ($regTarget -match '^(HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Desktop\\NameSpace_41040327)(?:\\|$)') {
+                        $permTarget = $matches[1]
+                    } elseif ($regTarget -match '^HKLM:\\(SYSTEM\\CurrentControlSet\\Control\\Class\\|SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\|SYSTEM\\CurrentControlSet\\Control\\WMI\\Autologger|SYSTEM\\CurrentControlSet\\Control\\Diagnostics\\Performance|SYSTEM\\CurrentControlSet\\Services\\(WdFilter|WdNisSvc|WdNisDrv|WaaSMedicSvc|SgrmBroker|webthreatdef|CDPUserSvc|WpnUserService)|SOFTWARE\\Microsoft\\Windows\\Dwm|SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices|SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost|SOFTWARE\\Microsoft\\WindowsRuntime\\ActivatableClassId|SOFTWARE\\Policies\\Microsoft\\Windows NT\\Printers)') {
+                        $permTarget = $regTarget
+                    }
+                }
+                if ($permTarget) {
+                    $qPermTarget = $permTarget.Replace("'", "''")
+                    $WrappedLine = @"
+try {
+    `$global:LASTEXITCODE = 0
+    Grant-RollbackRegPermission -RegPath '$qPermTarget'
+    try {
+        $Line
+    } finally {
+        Restore-RollbackRegPermission -RegPath '$qPermTarget'
+    }
+    `$SuccessCount++
+} catch {
+    `$FailCount++
+}
+"@
+                } else {
+                    $WrappedLine = @"
 try {
     `$global:LASTEXITCODE = 0
     $Line
@@ -3005,6 +3212,7 @@ try {
     `$FailCount++
 }
 "@
+                }
                 Add-Content -Path $RollbackScriptPath -Value $WrappedLine -Encoding UTF8
             }
         }
@@ -3345,10 +3553,11 @@ if ($global:IsLaptop) {
     Apply-Tweak "Запрет отключения жестких дисков от батареи (ПК)" { powercfg /change disk-timeout-dc 0 *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Для ПК никогда не отключать диски от батареи (если стоит ИБП)
 }
 
-# Глобальный запрет Plug and Play управлению питанием устройств
+# Очистка несуществующего ключа DisableMSPowerDeviceEnable из ветки PnP (управление сном устройств настраивается в Разделах 20 и 30)
 $PnpManager = "HKLM:\SYSTEM\CurrentControlSet\Control\PnP"
-if (!(Test-Path $PnpManager)) { Apply-Tweak "Создание раздела PnP" { New-Item -Path $PnpManager -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-Apply-Tweak "Глобальный запрет системы усыплять PnP устройства (DisableMSPowerDeviceEnable)" { Set-ItemProperty -Path $PnpManager -Name "DisableMSPowerDeviceEnable" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Запрет ОС "самовольно" усыплять USB/PCIe устройства на аппаратной шине
+if (Test-Path $PnpManager) {
+    Apply-Tweak "Очистка невалидного ключа DisableMSPowerDeviceEnable из Control\PnP" { Remove-ItemProperty -Path $PnpManager -Name "DisableMSPowerDeviceEnable" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+}
 
 Write-Host ""
 # ==============================================================================
@@ -3424,9 +3633,11 @@ if ($global:OptSpectre -and -not $global:OptAntiCheat -and $HasHardwareMitigatio
     }
 }
 
-# Отключение лимита задержек I/O (Позволяет процессору обрабатывать запросы накопителей без искусственных тормозов)
-Apply-Tweak "Отключение лимита задержек I/O процессора (IoLatencyCap)" { Set-ItemProperty -Path $KernelPath -Name "IoLatencyCap" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Отключение флага лимитов I/O" { Set-ItemProperty -Path $KernelPath -Name "IoLatencyCapEnabled" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+# Очистка IoLatencyCap из Session Manager\kernel (реальный путь StorPort настраивается в Разделе 27)
+Apply-Tweak "Удаление неверно размещённого IoLatencyCap из Session Manager\kernel" {
+    Remove-ItemProperty -Path $KernelPath -Name "IoLatencyCap" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    Remove-ItemProperty -Path $KernelPath -Name "IoLatencyCapEnabled" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+}
 
 Write-Host ""
 # ==============================================================================
@@ -3515,8 +3726,14 @@ if ($global:OptVBS) {
     
     # Остановка брокера System Guard (Один из триггеров DPC)
     if (Get-Service -Name "SgrmBroker" -ErrorAction SilentlyContinue) {
+        $sgrmReg = "HKLM:\SYSTEM\CurrentControlSet\Services\SgrmBroker"
         Apply-Tweak "Остановка брокера System Guard (SgrmBroker)" { Stop-Service -Name "SgrmBroker" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-        Apply-Tweak "Отключение брокера System Guard в реестре" { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\SgrmBroker" -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        Grant-RegPermission -RegPath $sgrmReg
+        try {
+            Apply-Tweak "Отключение брокера System Guard в реестре" { Set-ItemProperty -Path $sgrmReg -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        } finally {
+            Restore-RegPermission -RegPath $sgrmReg
+        }
     }
     
     # 5. Оптимизация сети: Отключение Virtual Machine Queues (VMQ)
@@ -3538,14 +3755,42 @@ if ($global:OptVBS) {
         Apply-Tweak "Оставление Kernel DMA Protection (Для Vanguard/FACEIT)" { Set-ItemProperty -Path $DmaKey -Name "DeviceEnumerationPolicy" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Для Vanguard/FACEIT защита DMA должна быть включена!
     }
     
-    # 7. Физическое уничтожение защиты VBS в UEFI BIOS (EFI-переменная SecConfig)
-    $CgHostPath = "$env:SystemRoot\System32\DeviceGuard\cg10cli.exe"
-    if (Test-Path $CgHostPath) {
-        Write-Host " [ВНИМАНИЕ] При следующей перезагрузке появится черный экран BIOS!" -ForegroundColor Magenta
-        Write-Host " Обязательно нажмите клавишу [F3] или [Win], чтобы подтвердить отключение VBS." -ForegroundColor DarkGray
-        Apply-Tweak "Сброс защищенной UEFI-переменной VBS/DeviceGuard" { 
-            # Вызываем встроенную утилиту Windows для отвязки гипервизора от UEFI
-            Start-Process $CgHostPath -ArgumentList "disable" -Wait -WindowStyle Hidden
+    # 7. Снятие UEFI Lock для VBS / Credential Guard через официальный инструмент Microsoft SecConfig.efi
+    $SecConfigEfi = "$env:SystemRoot\System32\SecConfig.efi"
+    $IsUefiNow = ($env:firmware_type -eq 'UEFI') -or ((Get-ComputerInfo -Property BiosFirmwareType -ErrorAction SilentlyContinue).BiosFirmwareType -match "UEFI")
+    $VbsRunning = $false
+    try {
+        $dgState = Get-CimInstance -Namespace "root\Microsoft\Windows\DeviceGuard" -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue
+        if ($dgState -and $dgState.VirtualizationBasedSecurityStatus -gt 0) { $VbsRunning = $true }
+    } catch {}
+
+    # Запускаем только в интерактивном режиме при реально активном VBS на UEFI, так как на экране перезагрузки потребуется подтверждение клавишей
+    if ($IsUefiNow -and $VbsRunning -and -not $Unattended -and (Test-Path -LiteralPath $SecConfigEfi)) {
+        $UsedLetters = [System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() }
+        $FreeLetter = ([char[]]([int][char]'Z'..[int][char]'D') | Where-Object { $UsedLetters -notcontains $_.ToString() } | Select-Object -First 1)
+        if ($FreeLetter) {
+            $FreeDrive = "${FreeLetter}:"
+            Write-Host " [ВНИМАНИЕ] При следующей перезагрузке появится экран подтверждения UEFI (SecConfig.efi)!" -ForegroundColor Magenta
+            Write-Host " Нажмите указанную на экране клавишу (обычно [F3] или [Win]), чтобы подтвердить отключение VBS/Credential Guard." -ForegroundColor DarkGray
+            Apply-Tweak "Планирование одноразового сброса UEFI-блокировки VBS через SecConfig.efi" {
+                try {
+                    cmd.exe /c "mountvol $FreeDrive /s >nul 2>&1"
+                    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$FreeDrive\EFI\Microsoft\Boot")) {
+                        throw "Не удалось смонтировать системный раздел EFI"
+                    }
+                    Copy-Item -LiteralPath $SecConfigEfi -Destination "$FreeDrive\EFI\Microsoft\Boot\SecConfig.efi" -Force -ErrorAction Stop
+                    $debugGuid = '{0cb3b571-2f2e-4343-a879-d86a476d7215}'
+                    & "$env:SystemRoot\System32\bcdedit.exe" /create $debugGuid /d "DebugTool" /application osloader *>$null
+                    & "$env:SystemRoot\System32\bcdedit.exe" /set $debugGuid path "\EFI\Microsoft\Boot\SecConfig.efi" *>$null
+                    & "$env:SystemRoot\System32\bcdedit.exe" /set '{bootmgr}' bootsequence $debugGuid *>$null
+                    & "$env:SystemRoot\System32\bcdedit.exe" /set $debugGuid loadoptions "DISABLE-LSA-ISO,DISABLE-VBS" *>$null
+                    & "$env:SystemRoot\System32\bcdedit.exe" /set $debugGuid device "partition=$FreeDrive" *>$null
+                    $global:LASTEXITCODE = 0
+                } finally {
+                    cmd.exe /c "mountvol $FreeDrive /d >nul 2>&1"
+                    $global:LASTEXITCODE = 0
+                }
+            }
         }
     }
 } elseif ($global:OptAI -or $global:ForceEnableVBS) {
@@ -3618,7 +3863,13 @@ if ($global:OptVBS) {
     }
     
     if (Get-Service -Name "SgrmBroker" -ErrorAction SilentlyContinue) {
-        Apply-Tweak "Включение брокера System Guard" { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\SgrmBroker" -Name "Start" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        $sgrmReg = "HKLM:\SYSTEM\CurrentControlSet\Services\SgrmBroker"
+        Grant-RegPermission -RegPath $sgrmReg
+        try {
+            Apply-Tweak "Включение брокера System Guard" { Set-ItemProperty -Path $sgrmReg -Name "Start" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        } finally {
+            Restore-RegPermission -RegPath $sgrmReg
+        }
         Apply-Tweak "Запуск брокера System Guard" { Start-Service -Name "SgrmBroker" -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     }
     
@@ -3907,15 +4158,15 @@ Apply-Tweak "Удаление Max3DWindowedPresentLimit (Возврат к си�
 
 $Flags = 3 # Флаг обновления профиля пользователя (SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
 
-Apply-Tweak "Аппаратное ускорение анимаций (SPI_SETUIEFFECTS)" { [void][UIAnim]::SystemParametersInfo(0x1043, 0, [IntPtr]1, $Flags) } # Включаем аппаратное ускорение анимаций (оставшихся)
-Apply-Tweak "Отключение выцветания меню (SPI_SETMENUFADE)" { [void][UIAnim]::SystemParametersInfo(0x1015, 0, [IntPtr]0, $Flags) } # Отключаем анимацию меню (выцветание)
-Apply-Tweak "Отключение аппаратной тени окна (SPI_SETDROPSHADOW)" { [void][UIAnim]::SystemParametersInfo(0x1025, 0, [IntPtr]0, $Flags) } # Отключаем грязную рамку (тень)
-Apply-Tweak "Включение ClearType на аппаратном уровне (SPI_SETCLEARTYPE)" { [void][UIAnim]::SystemParametersInfo(0x1049, 0, [IntPtr]1, $Flags) } # Включаем ClearType на аппаратном уровне
-Apply-Tweak "Отключение скольжения комбо-боксов (SPI_SETCOMBOBOXANIMATION)" { [void][UIAnim]::SystemParametersInfo(0x101B, 0, [IntPtr]0, $Flags) } # Отключаем скольжение комбо-боксов
-Apply-Tweak "Отключение анимации фокуса кнопок (SPI_SETMENUANIMATION)" { [void][UIAnim]::SystemParametersInfo(0x1005, 0, [IntPtr]0, $Flags) } # Отключаем анимацию фокуса кнопок
-Apply-Tweak "Отключение анимации списков (SPI_SETLISTBOXSMOOTHSCROLLING)" { [void][UIAnim]::SystemParametersInfo(0x1003, 0, [IntPtr]0, $Flags) } # Отключаем анимацию списков
-Apply-Tweak "Отключение тени от курсора мыши (SPI_SETCURSORSHADOW)" { [void][UIAnim]::SystemParametersInfo(0x1017, 0, [IntPtr]0, $Flags) } # Отключаем тень от курсора мыши
-Apply-Tweak "Включение плоского отображения меню (SPI_SETFLATMENU)" { [void][UIAnim]::SystemParametersInfo(0x103F, 0, [IntPtr]1, $Flags) } # Включаем плоское отображение меню
+Apply-Tweak "Аппаратное ускорение анимаций (SPI_SETUIEFFECTS)" { [void][UIAnim]::SystemParametersInfo(0x103F, 0, [IntPtr]1, $Flags) } # 0x103F = SPI_SETUIEFFECTS (должен идти ДО частных отключений)
+Apply-Tweak "Отключение выцветания меню (SPI_SETMENUFADE)" { [void][UIAnim]::SystemParametersInfo(0x1013, 0, [IntPtr]0, $Flags) } # 0x1013 = SPI_SETMENUFADE
+Apply-Tweak "Отключение аппаратной тени окна (SPI_SETDROPSHADOW)" { [void][UIAnim]::SystemParametersInfo(0x1025, 0, [IntPtr]0, $Flags) } # 0x1025 = SPI_SETDROPSHADOW
+Apply-Tweak "Включение ClearType на аппаратном уровне (SPI_SETCLEARTYPE)" { [void][UIAnim]::SystemParametersInfo(0x1049, 0, [IntPtr]1, $Flags) } # 0x1049 = SPI_SETCLEARTYPE
+Apply-Tweak "Отключение скольжения комбо-боксов (SPI_SETCOMBOBOXANIMATION)" { [void][UIAnim]::SystemParametersInfo(0x1005, 0, [IntPtr]0, $Flags) } # 0x1005 = SPI_SETCOMBOBOXANIMATION
+Apply-Tweak "Отключение анимации фокуса кнопок (SPI_SETMENUANIMATION)" { [void][UIAnim]::SystemParametersInfo(0x1003, 0, [IntPtr]0, $Flags) } # 0x1003 = SPI_SETMENUANIMATION
+Apply-Tweak "Отключение анимации списков (SPI_SETLISTBOXSMOOTHSCROLLING)" { [void][UIAnim]::SystemParametersInfo(0x1007, 0, [IntPtr]0, $Flags) } # 0x1007 = SPI_SETLISTBOXSMOOTHSCROLLING
+Apply-Tweak "Отключение тени от курсора мыши (SPI_SETCURSORSHADOW)" { [void][UIAnim]::SystemParametersInfo(0x101B, 0, [IntPtr]0, $Flags) } # 0x101B = SPI_SETCURSORSHADOW
+Apply-Tweak "Включение плоского отображения меню (SPI_SETFLATMENU)" { [void][UIAnim]::SystemParametersInfo(0x1023, 0, [IntPtr]1, $Flags) } # 0x1023 = SPI_SETFLATMENU
 
 Write-Host ""
 # ==============================================================================
@@ -4135,33 +4386,16 @@ if (Test-Path $FontHostPerf) {
     Apply-Tweak "Удаление ограничений приоритета FontDrvHost.exe" { Remove-Item -LiteralPath $FontHostPerf -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
 
-if (-not $global:OptAntiCheat) {
-    $IsDualCcdX3D = ($global:ProcInfo.Name -match "7900X3D|7950X3D|9900X3D|9950X3D")
-    $TrapApps = @("GameBarFTServer.exe", "bcastdvr.exe", "Cortana.exe")
-    if (-not $IsDualCcdX3D) { $TrapApps += "GameBarPresenceWriter.exe" }
-    foreach ($Trap in $TrapApps) {
-        $TrapPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$Trap"
-        $SilentExitPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\$Trap"
-        
-        if (!(Test-Path $TrapPath)) { Apply-Tweak "Создание IFEO для $Trap" { New-Item -Path $TrapPath -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-        if (!(Test-Path $SilentExitPath)) { Apply-Tweak "Создание SilentProcessExit для $Trap" { New-Item -Path $SilentExitPath -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-        
-        Apply-Tweak "Активация перенаправления (GlobalFlag) для $Trap" { Set-ItemProperty -Path $TrapPath -Name "GlobalFlag" -Value 512 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 512 = Разрешить Silent Process Exit (Перенаправление)
-        Apply-Tweak "Удаление ложного Debugger для $Trap" { Remove-ItemProperty -Path $TrapPath -Name "Debugger" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-        Apply-Tweak "Тихое завершение работы (ReportingMode) для $Trap" { Set-ItemProperty -Path $SilentExitPath -Name "ReportingMode" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Тихо завершить работу без создания отчета об ошибке
+# Удаляем фиктивный мониторинг GlobalFlag=512 / SilentProcessExit (компоненты GameDVR/GameBar штатно отключаются в Разделах 14 и 47)
+$TrapApps = @("GameBarFTServer.exe", "GameBarPresenceWriter.exe", "bcastdvr.exe", "Cortana.exe")
+foreach ($Trap in $TrapApps) {
+    $TrapIfeo = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$Trap"
+    $TrapSilent = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\$Trap"
+    if (Test-Path $TrapIfeo) {
+        Apply-Tweak "Очистка IFEO (GlobalFlag) для $Trap" { Remove-Item -LiteralPath $TrapIfeo -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     }
-} else {
-    # Восстанавливаем процессы для античитов (иначе могут кикнуть за вмешательство в ОС)
-    $TrapApps = @("GameBarFTServer.exe", "GameBarPresenceWriter.exe", "bcastdvr.exe", "Cortana.exe")
-    foreach ($Trap in $TrapApps) {
-        $TrapIfeo = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$Trap"
-        $TrapSilent = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\$Trap"
-        if (Test-Path $TrapIfeo) {
-            Apply-Tweak "Удаление IFEO для $Trap (Режим Античита)" { Remove-Item -LiteralPath $TrapIfeo -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-        }
-        if (Test-Path $TrapSilent) {
-            Apply-Tweak "Удаление SilentProcessExit для $Trap (Режим Античита)" { Remove-Item -LiteralPath $TrapSilent -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-        }
+    if (Test-Path $TrapSilent) {
+        Apply-Tweak "Очистка SilentProcessExit для $Trap" { Remove-Item -LiteralPath $TrapSilent -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     }
 }
 
@@ -4170,14 +4404,6 @@ if (-not $global:OptAntiCheat) {
 $PhysCores = [int]$global:ProcInfo.NumberOfCores
 $HasSMT = ($global:TotalLogCores -gt $PhysCores)
 $SkipThreads = if ($HasSMT) { 4 } else { 2 } # Пропускаем потоки первых 2 физических ядер
-
-[uint64]$CoolingAffinityMask = 0
-for ($i = $SkipThreads; $i -lt $global:TotalLogCores; $i++) {
-    if ($i -lt 64) {
-        $CoolingAffinityMask = $CoolingAffinityMask -bor ([uint64]1 -shl $i)
-    }
-}
-if ($CoolingAffinityMask -eq 0) { $CoolingAffinityMask = [uint64]::MaxValue }
 
 # Группа А: Критический софт помп и вентиляторов
 # Приоритет Below Normal (5) уступает игре, но гарантирует своевременное срабатывание вентиляторов при нагреве CPU/GPU.
@@ -4249,9 +4475,6 @@ $BloatHardwareApps = @(
     "OpenRGB.exe", "SignalRGB.exe" # Универсальные RGB-контроллеры
 )
 
-$SafeLogCores = if ($global:TotalLogCores -gt 64) { 64 } else { $global:TotalLogCores }
-$LastTwoThreadsMask = ([uint64]1 -shl ($SafeLogCores - 1)) -bor ([uint64]1 -shl ($SafeLogCores - 2))
-
 foreach ($App in $BloatHardwareApps) {
     $BaseAppKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$App"
     $PerfPath   = "$BaseAppKey\PerfOptions"
@@ -4303,11 +4526,14 @@ foreach ($Dxgi in $DxgiPaths) {
     }
 }
 
-# Предрендер для старых игр DirectX 9 (1 кадр для мониторов >75Hz для минимального инпут-лага, 3 кадра для 60-75Hz для плавности)
+# Предрендер для старых игр DirectX 9 (32-битные DX9-игры на x64 Windows читают ветку WOW6432Node)
 $MaxFramesDwm = if ($global:RefreshRate -le 75) { 3 } else { 1 }
-$D3D9 = "HKLM:\SOFTWARE\Microsoft\Direct3D"
-if (!(Test-Path $D3D9)) { Apply-Tweak "Создание раздела Direct3D" { New-Item $D3D9 -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-Apply-Tweak "Установка очереди кадров DirectX 9 ($MaxFramesDwm)" { Set-ItemProperty -Path $D3D9 -Name "MaxPrerenderedFrames" -Value $MaxFramesDwm -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # CPU готовит кадры заранее
+$D3D9Paths = @("HKLM:\SOFTWARE\Microsoft\Direct3D")
+if (Test-Path "HKLM:\SOFTWARE\WOW6432Node") { $D3D9Paths += "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Direct3D" }
+foreach ($D3D9 in $D3D9Paths) {
+    if (!(Test-Path $D3D9)) { Apply-Tweak "Создание раздела Direct3D ($D3D9)" { New-Item $D3D9 -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
+    Apply-Tweak "Установка очереди кадров DirectX 9 ($MaxFramesDwm) в $D3D9" { Set-ItemProperty -Path $D3D9 -Name "MaxPrerenderedFrames" -Value $MaxFramesDwm -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+}
 
 # Синхронизация DWM для мульти-мониторных систем
 if ($global:IsMultiMonitor) {
@@ -4391,7 +4617,7 @@ $Video = "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm" # Путь к дра
 $TotalRAM = $global:TotalRAM # Получаем общий объем ОЗУ из глобальной переменной
 
 Apply-Tweak "Отключение агрессивного кэширования файлов (LargeSystemCache)" { Set-ItemProperty -Path $MemMan -Name "LargeSystemCache" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключаем агрессивное кэширование файлов (защита от утечек ОЗУ и фризов в играх)
-Apply-Tweak "Отключение строгой защиты от записи в память" { Set-ItemProperty -Path $MemMan -Name "EnforceWriteProtection" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключаем строгую защиту от записи в память
+Apply-Tweak "Восстановление штатной защиты памяти ядра (удаление EnforceWriteProtection)" { Remove-ItemProperty -Path $MemMan -Name "EnforceWriteProtection" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Разрешение тримминга неактивной памяти Windows (Защита от OOM крашей)" { Remove-ItemProperty -Path $MemMan -Name "TrimWorkingSet" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Разрешить Windows нормально балансировать рабочий набор памяти и удалить запрет на тримминг
 
 # Запрет выгрузки ядра отключен (Защита от синих экранов при работе NVIDIA Frame Generation)
@@ -4461,9 +4687,8 @@ if (!(Test-Path $NumaKey)) { Apply-Tweak "Создание раздела NUMA" 
 Apply-Tweak "Удаление строгой групповой привязки потоков (NUMA)" { Remove-ItemProperty -Path $NumaKey -Name "GroupAffinityAssignment" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Включение параметра приводит к микрозадержкам шины Infinity Fabric и потере плавности в играх
 Apply-Tweak "Удаление запрета миграции потоков между чиплетами (AMD CCD)" { Remove-ItemProperty -Path $NumaKey -Name "StrictNumaNodeAffinity" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Разрешаем ОС хаотично перекидывать потоки между чиплетами
 
-if ($global:TotalLogCores -gt 16) {
-    Apply-Tweak "Оптимизация распределения страниц памяти (NodeOptions)" { Set-ItemProperty -Path $MemMan -Name "NodeOptions" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Оптимизируем распределение страниц памяти для многоядерных систем
-}
+# Очистка NodeOptions из Memory Management (ключ относится к IFEO конкретных процессов, а не к глобальной ветке памяти)
+Apply-Tweak "Очистка неверно размещённого ключа NodeOptions из Memory Management" { Remove-ItemProperty -Path $MemMan -Name "NodeOptions" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 # Очистка опасных твиков
 Apply-Tweak "Восстановление склеивания записи NVIDIA (DisableWriteCombining)" { Remove-ItemProperty -Path $Video -Name "DisableWriteCombining" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Восстанавливаем склеивание записи для NVIDIA (ускоряет рендеринг)
@@ -4492,9 +4717,11 @@ Apply-Tweak "Отключение ленивого режима MMCSS (NoLazyMod
 # 0 = Мгновенная реакция планировщика без задержки ожидания
 Apply-Tweak "Обнуление таймаута ленивого режима (LazyModeTimeout = 0)" { Set-ItemProperty -Path $MMCSS -Name "LazyModeTimeout" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
-# Снятие ограничений пула потоков MMCSS
-Apply-Tweak "Увеличение лимита мультимедиа потоков на процесс" { Set-ItemProperty -Path $MMCSS -Name "MaxThreadsPerProcess" -Value 128 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Увеличиваем макс. количество мультимедиа-потоков на процесс до 128
-Apply-Tweak "Увеличение глобального лимита мультимедиа потоков" { Set-ItemProperty -Path $MMCSS -Name "MaxThreadsTotal" -Value 65535 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Увеличиваем глобальный лимит потоков в системе
+# Очистка параметров MMCSS, не влияющих на лимиты регистрации потоков в mmcss.sys
+Apply-Tweak "Очистка неэффективных лимитов MMCSS (MaxThreadsPerProcess, MaxThreadsTotal)" {
+    Remove-ItemProperty -Path $MMCSS -Name "MaxThreadsPerProcess" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    Remove-ItemProperty -Path $MMCSS -Name "MaxThreadsTotal" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+}
 
 # Ускорение цикла планировщика MMCSS
 Apply-Tweak "Ускорение периода планировщика MMCSS (5 мс)" { Set-ItemProperty -Path $MMCSS -Name "SchedulerPeriod" -Value 50000 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 50000 = 5мс (Минимально допустимый порог планировщика, по умолчанию 10мс)
@@ -4509,7 +4736,7 @@ Apply-Tweak "Категория диспетчеризации High для иг�
 Apply-Tweak "Высший приоритет ввода-вывода для игр (SFIO Priority = High)" { Set-ItemProperty -Path $GamesTask -Name "SFIO Priority" -Value "High" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Приоритетная работа профиля Games (Background Only = False)" { Set-ItemProperty -Path $GamesTask -Name "Background Only" -Value "False" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Штатный таймер MMCSS для профиля Games (Clock Rate = 10000)" { Set-ItemProperty -Path $GamesTask -Name "Clock Rate" -Value 10000 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Clock Rate = 10000 (1 мс — стандарт mmcss.sys; значения ниже 10000 могут вызывать сбой регистрации MMCSS-задачи)
-Apply-Tweak "Запрет игре уступать такты процессора (NoYield)" { Set-ItemProperty -Path $GamesTask -Name "NoYield" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Запрещаем процессу игры уступать такты процессора другим задачам
+Apply-Tweak "Очистка неподдерживаемого параметра NoYield из профиля Games" { Remove-ItemProperty -Path $GamesTask -Name "NoYield" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Маркировка игр как чувствительных к задержкам" { Set-ItemProperty -Path $GamesTask -Name "Latency Sensitive" -Value "True" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Игра помечается как чувствительная к задержкам (как аудио-студия)
 
 # Защита микрофона и вывода звука Discord от игровых статтеров
@@ -4697,8 +4924,7 @@ if ($ForceDisableHags) {
 $DxgKey = "HKLM:\SYSTEM\CurrentControlSet\Services\DXGKrnl\Parameters"
 if (!(Test-Path $DxgKey)) { Apply-Tweak "Создание параметров DXGKrnl" { New-Item -Path $DxgKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 Apply-Tweak "Сброс прерываний GPU (GPUPreemption)" { Remove-ItemProperty -Path $DxgKey -Name "GPUPreemption" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-$HwFlipEnableVal = if ($FinalHagsValue -ge 2 -and $global:RefreshRate -gt 75) { 1 } else { 0 }
-Apply-Tweak "Синхронизация аппаратной очереди кадров (HardwareFlipQueueEnabled = $HwFlipEnableVal)" { Set-ItemProperty -Path $DxgKey -Name "HardwareFlipQueueEnabled" -Value $HwFlipEnableVal -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+Apply-Tweak "Очистка невалидного параметра HardwareFlipQueueEnabled" { Remove-ItemProperty -Path $DxgKey -Name "HardwareFlipQueueEnabled" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 # Применение HAGS в реестр
 Apply-Tweak "Установка режима аппаратного планировщика (HAGS)" { 
@@ -4708,16 +4934,13 @@ Apply-Tweak "Установка режима аппаратного планир
 }
 
 if ($FinalHagsValue -ge 2) {
-    # HwSchPriority = 1: повышенный приоритет планировщика GPU для современной видеокарты
-    Apply-Tweak "Высший приоритет аппаратному планировщику GPU" { Set-ItemProperty -Path $GraphicsPath -Name "HwSchPriority" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    # GpuPreference = 2: предпочтение высокопроизводительного GPU
     Apply-Tweak "Использование высокопроизводительного GPU (GpuPreference)" { Set-ItemProperty -Path $GraphicsPath -Name "GpuPreference" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    # DisableHwFlipQueue = 0: разрешаем аппаратную очередь Flip Queue для снижения задержки кадра
-    Apply-Tweak "Разрешение аппаратной очереди HwFlipQueue" { Set-ItemProperty -Path $GraphicsPath -Name "DisableHwFlipQueue" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 } else {
-    Apply-Tweak "Сброс приоритета аппаратного планировщика" { Remove-ItemProperty -Path $GraphicsPath -Name "HwSchPriority" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     Apply-Tweak "Сброс предпочтений GPU" { Remove-ItemProperty -Path $GraphicsPath -Name "GpuPreference" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    Apply-Tweak "Отключение аппаратной очереди HwFlipQueue" { Set-ItemProperty -Path $GraphicsPath -Name "DisableHwFlipQueue" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+}
+Apply-Tweak "Очистка невалидных параметров HwSchPriority и DisableHwFlipQueue" {
+    Remove-ItemProperty -Path $GraphicsPath -Name "HwSchPriority" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    Remove-ItemProperty -Path $GraphicsPath -Name "DisableHwFlipQueue" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
 }
 
 # Удаляем флаги принудительного обхода блок-листа драйверов HAGS (защита от включения HAGS на нестабильных драйверах/версиях ядра)
@@ -4731,11 +4954,7 @@ Apply-Tweak "Непрерывное сопоставление памяти DMA 
     Set-ItemProperty -Path $GraphicsPath -Name "DpiMapIommuContiguous" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
 }
 
-if ($global:OptAntiCheat) {
-    Apply-Tweak "Включение проверки цифровых подписей драйверов (Режим Античита)" { Remove-ItemProperty -Path $GraphicsPath -Name "DisableSignatureCheck" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # В режиме античита подпись драйверов ОБЯЗАТЕЛЬНА
-} else {
-    Apply-Tweak "Отключение проверки цифровой подписи видеодрайверов" { Set-ItemProperty -Path $GraphicsPath -Name "DisableSignatureCheck" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Отключаем проверку подписи драйверов (для кастомных модов)
-}
+Apply-Tweak "Очистка нерабочего параметра DisableSignatureCheck из GraphicsDrivers" { Remove-ItemProperty -Path $GraphicsPath -Name "DisableSignatureCheck" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 # TDR Delay (Защита от зависаний видеодрайвера)
 Apply-Tweak "Включение безопасного восстановления драйвера при сбое (TdrLevel)" { Set-ItemProperty -Path $GraphicsPath -Name "TdrLevel" -Value 3 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 3 = Включаем безопасное восстановление драйвера при сбое
@@ -4764,40 +4983,20 @@ Apply-Tweak "Запрет сна синхронизации VSync в плани�
     Set-ItemProperty -Path $GpuScheduler -Name "VsyncIdleTimeout" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
 }
 
-if ($global:RefreshRate -le 75) {
-    # Для 60-75 Гц: Плавный VSync, приоритет активному окну
-    $SchTweaks = @{
-        "EnablePreemption"                = 1 # Обязательно 1 (Разрешает прерывания, спасает от фризов)
-        "FlipOnVSyncWithNoWait"           = 0 # Ждать синхроимпульс (Плавная картинка без разрывов)
-        "AdjustWorkerThreadPriority"      = 1 # Адаптивный приоритет потоков
-        "ForegroundPriorityBoost"         = 1 # Буст активного окна (Игры)
-    }
-    foreach ($Tweak in $SchTweaks.GetEnumerator()) {
-        Apply-Tweak "Оптимизация WDDM для 60-75Hz ($($Tweak.Name))" { Set-ItemProperty -Path $GpuScheduler -Name $Tweak.Name -Value $Tweak.Value -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    }
-    # Удаляем агрессивные Flip-очереди для старых мониторов
-    $BadTweaks = @("EnableFlipImmediateSwFlipQueue", "EnableFlipOnVSyncHwFlipQueue", "EnableFlipOnVSyncSwFlipQueue")
-    foreach ($Tweak in $BadTweaks) { Apply-Tweak "Удаление агрессивного твика Flip: $Tweak" { Remove-ItemProperty -Path $GpuScheduler -Name $Tweak *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-} else {
-    # Для 120+ Гц: Современный Flip-модель с сохранением плавности
-    $SchTweaks = @{
-        "EnablePreemption"                = 1 # Обязательно 1! (0 вызывает мертвые зависания)
-        "EnableFlipImmediateSwFlipQueue"  = 1 # Включаем немедленный программный Flip (Снижает инпут-лаг)
-        "EnableFlipOnVSyncHwFlipQueue"    = 1 # Включаем аппаратный Flip по VSync
-        "EnableFlipOnVSyncSwFlipQueue"    = 1 # Включаем программный Flip по VSync
-        "FlipOnVSyncWithNoWait"           = 0 # 0 = Правильная синхронизация кадров без статтеров
-        "AdjustWorkerThreadPriority"      = 1 # Включаем регулировку приоритета потоков
-        "ForegroundPriorityBoost"         = 1 # 1 = Выдаем максимальный приоритет активной игре
-    }
-    foreach ($Tweak in $SchTweaks.GetEnumerator()) {
-        Apply-Tweak "Оптимизация WDDM для 120Hz+ ($($Tweak.Name))" { Set-ItemProperty -Path $GpuScheduler -Name $Tweak.Name -Value $Tweak.Value -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    }
+$SchTweaks = @{
+    "EnablePreemption"           = 1 # Обязательно 1 (Разрешает прерывания, спасает от фризов)
+    "FlipOnVSyncWithNoWait"      = 0 # Правильная синхронизация кадров без статтеров
+    "AdjustWorkerThreadPriority" = 1 # Адаптивный приоритет потоков
+    "ForegroundPriorityBoost"    = 1 # Буст активного окна (Игры)
+}
+foreach ($Tweak in $SchTweaks.GetEnumerator()) {
+    Apply-Tweak "Оптимизация WDDM Scheduler ($($Tweak.Name))" { Set-ItemProperty -Path $GpuScheduler -Name $Tweak.Name -Value $Tweak.Value -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
 
-if ($global:RefreshRate -ge 120) {
-    Apply-Tweak "Прямая запись кадра в железный буфер (HwFlipQueue)" { Set-ItemProperty -Path $GpuScheduler -Name "EnableFlipImmediateHwFlipQueue" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    # Удаляем VBlankTimeout = 0 во избежание холостых циклов CPU (Spin-wait)
-    Apply-Tweak "Удаление VBlankTimeout (Устранение холостых циклов CPU)" { Remove-ItemProperty -Path $GpuScheduler -Name "VBlankTimeout" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+# Очистка устаревших/нестабильных флагов FlipQueue и VBlankTimeout
+$LegacyFlipTweaks = @("EnableFlipImmediateHwFlipQueue", "EnableFlipImmediateSwFlipQueue", "EnableFlipOnVSyncHwFlipQueue", "EnableFlipOnVSyncSwFlipQueue", "VBlankTimeout")
+foreach ($Tweak in $LegacyFlipTweaks) {
+    Apply-Tweak "Очистка устаревшего параметра Scheduler: $Tweak" { Remove-ItemProperty -Path $GpuScheduler -Name $Tweak -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
 
 # Удаление опасного лимита прерываний GPU (Возврат системного таймаута WDDM)
@@ -4855,9 +5054,8 @@ if (Test-Path $GpuMem) {
     }
 }
 
-# Абсолютный глобальный Low Latency для DX12/Vulkan на уровне ядра ОС
-$maxFrames = if ($global:RefreshRate -le 75) { 2 } else { 1 } # Оптимальные значения: 1 для 120Hz+ (GPU всегда занят), 2 для 60Hz.
-Apply-Tweak "Глобальное снижение задержки очереди кадров (MaxQueuedFrames = $maxFrames)" { Set-ItemProperty -Path $DxgKey -Name "MaxQueuedFrames" -Value $maxFrames -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Ограничиваем очередь подготовленных кадров на уровне ядра графики
+# Очистка невалидного параметра MaxQueuedFrames из DXGKrnl\Parameters (реальная очередь кадров задаётся в драйвере GPU и NPI)
+Apply-Tweak "Очистка невалидного параметра MaxQueuedFrames из DXGKrnl" { Remove-ItemProperty -Path $DxgKey -Name "MaxQueuedFrames" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 Apply-Tweak "Отвязка основного потока графики от Core 0" { Remove-ItemProperty -Path $DxgKey -Name "ThreadAffinity" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем привязку к Core 0, даем ОС самостоятельно распределить основной поток рендеринга
 Apply-Tweak "Увеличение буфера DMA до 16 МБ для PCIe 4.0/5.0" { Set-ItemProperty -Path $DxgKey -Name "DmaBufferSizeBytes" -Value 16777216 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 16777216 = Увеличиваем лимит буферов прямого доступа (DMA) до 16 МБ для современных шин PCIe 4.0/5.0
@@ -4933,10 +5131,18 @@ if ($EnumBase) {
                         $AffinitySubPath = "$EnumeratorName\$DeviceName\$InstanceName\Device Parameters\Interrupt Management\Affinity Policy"
                         $TargetKey = $EnumBase.OpenSubKey($AffinitySubPath, $false)
                         if ($TargetKey) {
-                            $FullAffinityPSPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$AffinitySubPath"
-                            Apply-Tweak "Удаление старой маски прерываний ($FullAffinityPSPath)" { Remove-ItemProperty -LiteralPath $FullAffinityPSPath -Name "AssignmentSetOverride" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                            Apply-Tweak "Удаление старой политики устройства ($FullAffinityPSPath)" { Remove-ItemProperty -LiteralPath $FullAffinityPSPath -Name "DevicePolicy" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                            # Закрываем дескриптор чтения ДО смены прав и удаления значений
                             $TargetKey.Close()
+                            $DevParamsPSPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$EnumeratorName\$DeviceName\$InstanceName\Device Parameters"
+                            $FullAffinityPSPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$AffinitySubPath"
+                            # Ветка Device Parameters принадлежит SYSTEM — без Grant-RegPermission удаление отклоняется
+                            Grant-RegPermission -RegPath $DevParamsPSPath
+                            try {
+                                Apply-Tweak "Удаление старой маски прерываний ($FullAffinityPSPath)" { Remove-ItemProperty -LiteralPath $FullAffinityPSPath -Name "AssignmentSetOverride" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                                Apply-Tweak "Удаление старой политики устройства ($FullAffinityPSPath)" { Remove-ItemProperty -LiteralPath $FullAffinityPSPath -Name "DevicePolicy" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                            } finally {
+                                Restore-RegPermission -RegPath $DevParamsPSPath
+                            }
                         }
                     }
                     $DeviceKey.Close()
@@ -4997,8 +5203,8 @@ if ($SCSIControllers) {
     }
 }
 
-# Активация MSI для USB xHCI контроллеров
-$USBControllers = Get-CimInstance Win32_USBController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "xHCI|3\.0|3\.1" }
+# Активация MSI для USB xHCI контроллеров (включая USB 3.2, USB4 и русскую локализацию Windows)
+$USBControllers = Get-CimInstance Win32_USBController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "xHCI|3\.0|3\.1|3\.2|USB4|Расширяемый|eXtensible" }
 if ($USBControllers) {
     foreach ($usb in $USBControllers) {
         if ($usb.PNPDeviceID) {
@@ -5060,47 +5266,42 @@ if ($global:RefreshRate -le 75) {
     if (Test-Path $NvKey) { Apply-Tweak "Высокий приоритет ядра NVIDIA" { Set-ItemProperty -Path $NvKey -Name "ThreadPriority" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 }
 
-# Оптимизация контроллера шины PCI
+# Очистка невалидных (не читаемых ядром и pci.sys) ключей шины PCI и перенос очистки HackFlags в реальный путь Control\PnP\Pci
 $PciParams = "HKLM:\SYSTEM\CurrentControlSet\Control\PnP\Pci"
-if (!(Test-Path $PciParams)) { Apply-Tweak "Создание раздела Pci" { New-Item $PciParams -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-Apply-Tweak "Увеличение лимита прерываний PCI до 2048" { Set-ItemProperty -Path $PciParams -Name "InterruptMessageLimit" -Value 2048 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Отключение задержек толерантности шины (DisableLtr)" { Set-ItemProperty -Path $PciParams -Name "DisableLtr" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Разрешение нативного управления PCI Express" { Set-ItemProperty -Path $PciParams -Name "PciExpressNativeControl" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-
-# Глобальный аппаратный запрет ASPM (Сон PCIe) на уровне драйвера pci.sys
-$PciSys = "HKLM:\SYSTEM\CurrentControlSet\Services\pci\Parameters"
-if (!(Test-Path $PciSys)) { Apply-Tweak "Создание раздела параметров pci.sys" { New-Item -Path $PciSys -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-if ($global:OptHwSleep) {
-    Apply-Tweak "Аппаратный запрет сна шины PCIe (DisableASPM)" { Set-ItemProperty -Path $PciSys -Name "DisableASPM" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Полный запрет сна шины
-    Apply-Tweak "Отключение состояния сна D3 для PCIe" { Set-ItemProperty -Path $PciSys -Name "DefaultD3State" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключение состояния D3
-    Write-Host "[WARNING] ASPM PCIe принудительно отключен" -ForegroundColor DarkGray
-} else {
-    Apply-Tweak "Разрешение сна шины PCIe (ASPM)" { Set-ItemProperty -Path $PciSys -Name "DisableASPM" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Оставляем дефолт
-    Apply-Tweak "Включение состояния сна D3 для PCIe" { Set-ItemProperty -Path $PciSys -Name "DefaultD3State" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    Write-Host " ► ASPM PCIe оставлен включённым (Сон шины разрешен)" -ForegroundColor DarkGray
-}
-
-# Отключение DMI и PEG аппаратного сна (Делает связь CPU-Чипсет-USB монолитной)
-Apply-Tweak "Отключение аппаратного сна DMI" { Set-ItemProperty -Path $PciParams -Name "DmiEnableAsm" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Отключение аппаратного сна PEG" { Set-ItemProperty -Path $PciParams -Name "PegAsmEnable" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Очистка HackFlags шины PCI (Защита от отвала GPU)" { Remove-ItemProperty -Path $PciSys -Name "HackFlags" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-
-# Удаляем фиктивные лимиты MessageNumberLimit: Windows и драйвер обязаны считывать реальный лимит векторов из дескриптора PCIe
-$DiscreteGPUs = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match "NVIDIA|AMD|Radeon" -and $_.Name -notmatch "Basic" }
-foreach ($GPU in $DiscreteGPUs) {
-    $MsiKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($GPU.PNPDeviceID)\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
-    if (Test-Path $MsiKey) { 
-        Apply-Tweak "Аппаратное согласование векторов MSI для $($GPU.Name)" { Remove-ItemProperty -Path $MsiKey -Name "MessageNumberLimit" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } 
+if (Test-Path $PciParams) {
+    Apply-Tweak "Очистка невалидных ключей Control\PnP\Pci и HackFlags" {
+        foreach ($badPciKey in @("InterruptMessageLimit", "DisableLtr", "PciExpressNativeControl", "DmiEnableAsm", "PegAsmEnable", "HackFlags")) {
+            Remove-ItemProperty -Path $PciParams -Name $badPciKey -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        }
     }
 }
 
+$PciSys = "HKLM:\SYSTEM\CurrentControlSet\Services\pci\Parameters"
+if (Test-Path $PciSys) {
+    Apply-Tweak "Очистка невалидных ключей Services\pci\Parameters и HackFlags" {
+        foreach ($badPciSysKey in @("DisableASPM", "DefaultD3State", "HackFlags")) {
+            Remove-ItemProperty -Path $PciSys -Name $badPciSysKey -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        }
+    }
+}
+
+# Для NVMe: захватываем права SYSTEM на Device Parameters, снимаем лимит векторов и удаляем фиктивный ключ EnableMSIX
 $SCSIControllers = Get-CimInstance Win32_SCSIController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "NVMe|NVM Express" }
 foreach ($scsi in $SCSIControllers) {
     if ($scsi.PNPDeviceID -match "^PCI") {
-        $RegBase = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($scsi.PNPDeviceID)\Device Parameters\Interrupt Management"
-        if (Test-Path "$RegBase\MessageSignaledInterruptProperties") {
-            Apply-Tweak "Аппаратное согласование векторов MSI для NVMe ($($scsi.Name))" { Remove-ItemProperty -Path "$RegBase\MessageSignaledInterruptProperties" -Name "MessageNumberLimit" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            Apply-Tweak "Активация MSI-X для NVMe" { Set-ItemProperty -Path $RegBase -Name "EnableMSIX" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        $ScsiDevParams = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($scsi.PNPDeviceID)\Device Parameters"
+        $RegBase = "$ScsiDevParams\Interrupt Management"
+        $MsiPropKey = "$RegBase\MessageSignaledInterruptProperties"
+        Grant-RegPermission -RegPath $ScsiDevParams
+        try {
+            if (Test-Path $MsiPropKey) {
+                Apply-Tweak "Аппаратное согласование векторов MSI для NVMe ($($scsi.Name))" { Remove-ItemProperty -Path $MsiPropKey -Name "MessageNumberLimit" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            }
+            if (Test-Path $RegBase) {
+                Apply-Tweak "Удаление невалидного ключа EnableMSIX у NVMe ($($scsi.Name))" { Remove-ItemProperty -Path $RegBase -Name "EnableMSIX" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            }
+        } finally {
+            Restore-RegPermission -RegPath $ScsiDevParams
         }
     }
 }
@@ -5279,13 +5480,14 @@ if ($Adapters) {
             if ($global:IsLaptop) {
                 # На ноутбуке включаем ULPS (Иначе высадит батарею)
                 Apply-Tweak "Включение ULPS (Ноутбук)" { Set-ItemProperty -LiteralPath $RegPath -Name "EnableUlps" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                Apply-Tweak "Включение ULPS NA" { Set-ItemProperty -LiteralPath $RegPath -Name "EnableUlps_NA" -Value 1 -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                Apply-Tweak "Включение Ulps2" { Set-ItemProperty -LiteralPath $RegPath -Name "Ulps2" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                Apply-Tweak "Включение ULPS NA" { Set-ItemProperty -LiteralPath $RegPath -Name "EnableUlps_NA" -Value "1" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
             } else {
                 # На ПК отключаем ULPS (Убирает просадки FPS)
                 Apply-Tweak "Отключение ULPS (Устранение просадок FPS)" { Set-ItemProperty -LiteralPath $RegPath -Name "EnableUlps" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                Apply-Tweak "Отключение ULPS NA" { Set-ItemProperty -LiteralPath $RegPath -Name "EnableUlps_NA" -Value 0 -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                Apply-Tweak "Отключение Ulps2" { Set-ItemProperty -LiteralPath $RegPath -Name "Ulps2" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                Apply-Tweak "Отключение ULPS NA" { Set-ItemProperty -LiteralPath $RegPath -Name "EnableUlps_NA" -Value "0" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            }
+            Apply-Tweak "Очистка невалидного ключа Ulps2" { Remove-ItemProperty -LiteralPath $RegPath -Name "Ulps2" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            if (-not $global:IsLaptop) {
                 # Отключает микро-сон линий PCIe L0s и L1 внутри драйвера amdkmdag.sys на ПК
                 Apply-Tweak "Отключение микро-сна линий PCIe L0s/L1 в драйвере AMD" {
                     Set-ItemProperty -LiteralPath $RegPath -Name "EnableAspmL0s" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
@@ -5329,9 +5531,13 @@ if ($Adapters) {
             }
             Apply-Tweak "Очередь кадров = 1 (AMD UMD FlipQueueSize Binary)" { Set-ItemProperty -LiteralPath $UmdPath -Name "FlipQueueSize" -Value ([byte[]](0x31,0x00)) -Type Binary -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
-            # Убийство скрытых статтеров текстур
-            Apply-Tweak "Наивысшее качество текстур (TextureLod = 0)" { Set-ItemProperty -LiteralPath $RegPath -Name "TextureLod" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Наивысшее качество
-            Apply-Tweak "Отключение снижения качества текстур (TFQ)" { Set-ItemProperty -LiteralPath $RegPath -Name "TFQ" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Отключить снижение качества текстур
+            # Очищаем ошибочные DWord-копии TextureLod и TFQ из корня адаптера и записываем их в $UmdPath в формате REG_BINARY
+            Apply-Tweak "Очистка неверно размещённых TextureLod и TFQ из корня адаптера" {
+                Remove-ItemProperty -LiteralPath $RegPath -Name "TextureLod" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                Remove-ItemProperty -LiteralPath $RegPath -Name "TFQ" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+            }
+            Apply-Tweak "Наивысшее качество текстур (AMD UMD TextureLod Binary)" { Set-ItemProperty -LiteralPath $UmdPath -Name "TextureLod" -Value ([byte[]](0x30,0x00,0x00,0x00)) -Type Binary -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            Apply-Tweak "Отключение снижения качества текстур (AMD UMD TFQ Binary)" { Set-ItemProperty -LiteralPath $UmdPath -Name "TFQ" -Value ([byte[]](0x30,0x00)) -Type Binary -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
             Apply-Tweak "Оптимизация против статтеров (StutterMode = 0)" { Set-ItemProperty -LiteralPath $RegPath -Name "StutterMode" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Оптимизация против статтеров
             
             # Восстановление поддержки HDCP для видеокарт AMD
@@ -5418,15 +5624,6 @@ if ($Adapters) {
                     Remove-ItemProperty -LiteralPath $RegPath -Name "CrossAdapterScanOut" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
                 }
             }
-        }
-        # ==========================================
-        # Твики для Intel (встройка)
-        # ==========================================
-        elseif ($Provider -match "Intel" -or $Desc -match "Intel") {
-            Write-Host " ► Обнаружена видеокарта Intel. Настройка реестра..." -ForegroundColor DarkGray
-            # Откат отключения HDCP для встроенной графики Intel
-            Apply-Tweak "Удаление отключения HDCP (Intel)" { Remove-ItemProperty -LiteralPath $RegPath -Name "DisableHDCP" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            Apply-Tweak "Отключение Panel Self Refresh (Энергосбережение Intel)" { Set-ItemProperty -LiteralPath $RegPath -Name "FeatureTestControl" -Value 37458 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 37458 = Отключение энергосбережения Panel Self Refresh (PSR)
         }
         Apply-Tweak "Восстановление прав на класс видеокарты" { Restore-RegPermission -RegPath $RegPath } # Возвращаем права системе
     }
@@ -5639,7 +5836,7 @@ Apply-Tweak "Увеличение лимита кэша OpenGL до 10 ГБ" { S
 $GpuEnergy = "HKLM:\SYSTEM\CurrentControlSet\Services\gpuenergydrv"
 if (Test-Path $GpuEnergy) {
     Apply-Tweak "Захват прав на драйвер gpuenergydrv" { Grant-RegPermission -RegPath $GpuEnergy } # Взламываем права драйвера
-    Apply-Tweak "Включение NVIDIA GPU Energy Driver" { Set-ItemProperty -Path $GpuEnergy -Name "Start" -Value 3 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Отключение может вызывать микро-рывки (pacing issues) при включенной генерации кадров (DLSS 3 Frame Gen) в новых играх
+    Apply-Tweak "Включение NVIDIA GPU Energy Driver" { Set-ItemProperty -Path $GpuEnergy -Name "Start" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = System (штатный запуск драйвера при инициализации ядра)
     Apply-Tweak "Возврат прав на драйвер gpuenergydrv" { Restore-RegPermission -RegPath $GpuEnergy }
 }
 
@@ -5734,7 +5931,8 @@ if ($NetAdapters) {
                 # Определяем оптимальное число аппаратных очередей RSS сетевой карты (4 очереди для процессоров с 4+ потоками, иначе 2)
                 # Для Realtek GbE (1 Gbps) лимит очередей в драйвере строго 2, для 2.5G/10G карт — 4
                 $isWiredEthernet = ($Adapter.PhysicalMediaType -eq '802.3' -or $Adapter.MediaType -eq '802.3')
-                $isRealtekGbE = ($Adapter.InterfaceDescription -match "Realtek.*(GbE|Gigabit|Family|RTL8168|RTL8111)")
+                # Ограничиваем 2 очередями только 1G-карты Realtek, не задевая 2.5G/5G/10G контроллеры (в их названии тоже есть "GbE Family")
+                $isRealtekGbE = ($Adapter.InterfaceDescription -match "Realtek.*(GbE|Gigabit|Family|RTL8168|RTL8111)") -and ($Adapter.InterfaceDescription -notmatch "2\.5G|5G|10G|RTL8125|RTL8126")
                 $RssQueuesCount = if ($isRealtekGbE) { "2" } elseif ($global:TotalLogCores -ge 4) { "4" } else { "2" }
                 # Привязано к OptTCP: в экстремальной сети отключаем LSO/USO/RSC, в обычном режиме оставляем аппаратную разгрузку включенной
                 $OffloadVal = if ($global:OptTCP) { "0" } else { "1" }
@@ -5796,21 +5994,6 @@ if ($NetAdapters) {
                     }
                 }
             }
-        }
-        
-        # Настройка политики прерываний с захватом прав на ветку Device Parameters (без него доступ в Enum часто отклоняется)
-        $NetParentDevParams = "HKLM:\SYSTEM\CurrentControlSet\Enum\$PnpID\Device Parameters"
-        $AffinityKey = "$NetParentDevParams\Interrupt Management\Affinity Policy"
-        Grant-RegPermission -RegPath $NetParentDevParams
-        try {
-            if (!(Test-Path $AffinityKey)) { 
-                Apply-Tweak "Создание ключа Affinity для '$NetName'" { New-Item -Path $AffinityKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            }
-            if (Test-Path $AffinityKey) { 
-                Apply-Tweak "Привязка прерываний '$NetName' к ядрам (DevicePolicy=0)" { Set-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-            }
-        } finally {
-            Restore-RegPermission -RegPath $NetParentDevParams
         }
         
         Apply-Tweak "Отключение широковещательного сканера LLTD Mapper для $NetName" { Disable-NetAdapterBinding -Name $NetName -ComponentID "ms_lltdio" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
@@ -5930,8 +6113,8 @@ if ($WiFiAdapters) {
     }
 }
 
-# Аппаратное распределение прерываний сетевой карты (Zero Network Bottleneck)
-$NetAdapters = Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' -and (Get-NetAdapterBinding -Name $_.Name -ComponentID "vms_pp" -ErrorAction SilentlyContinue).Enabled -ne $true }
+# Аппаратное распределение прерываний только для PCI-сетевых карт (USB-адаптеры не используют Interrupt Management в PCI-стеке)
+$NetAdapters = Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' -and $_.PnPDeviceID -match "^PCI\\" -and (Get-NetAdapterBinding -Name $_.Name -ComponentID "vms_pp" -ErrorAction SilentlyContinue).Enabled -ne $true }
 foreach ($Adapter in $NetAdapters) {
     $PnpID = $Adapter.PnPDeviceID
     $NetDevParams = "HKLM:\SYSTEM\CurrentControlSet\Enum\$PnpID\Device Parameters"
@@ -5961,13 +6144,6 @@ foreach ($Adapter in $NetAdapters) {
 $NdisParams = "HKLM:\SYSTEM\CurrentControlSet\Services\NDIS\Parameters"
 if (!(Test-Path $NdisParams)) { Apply-Tweak "Создание раздела NDIS Parameters" { New-Item $NdisParams -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 
-# Предварительное выделение 2048 буферов приема/передачи в невыгружаемом пуле оперативной памяти.
-Apply-Tweak "Предвыделение 2048 буферов приема NDIS" { Set-ItemProperty -Path $NdisParams -Name "NumRcvBuffers" -Value 2048 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Защищает от потери UDP-пакетов (телепортов) при 100% нагрузке CPU
-Apply-Tweak "Предвыделение 2048 буферов отправки NDIS" { Set-ItemProperty -Path $NdisParams -Name "NumTxBuffers" -Value 2048 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Выделяем 2048 буферов на отправку
-
-# Расширение пула рабочих потоков NDIS для обработки гигантских очередей пакетов
-Apply-Tweak "Расширение пула рабочих потоков NDIS" { Set-ItemProperty -Path $NdisParams -Name "MaxNumWorkItems" -Value 2048 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Лимит рабочих элементов
-Apply-Tweak "Размер лога пред-аллокации MAC NDIS" { Set-ItemProperty -Path $NdisParams -Name "NumMacOamPreAllocLog" -Value 256 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Размер лога пред-аллокации MAC
 Apply-Tweak "Включение аппаратного хеширования RSS в ядре NDIS" { Set-ItemProperty -Path $NdisParams -Name "EnableRSS" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Включаем хеширование (RSS) на уровне ядра NDIS
 
 # Удаляем вредные лимиты времени и количества прерываний DPC для сети
@@ -5975,17 +6151,32 @@ Apply-Tweak "Удаление лимита MaxDpcCount" { Remove-ItemProperty -P
 Apply-Tweak "Удаление лимита MaxDpcTime" { Remove-ItemProperty -Path $NdisParams -Name "MaxDpcTime" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Удаление лимита RssBaseCpu" { Remove-ItemProperty -Path $NdisParams -Name "RssBaseCpu" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем глобальный ограничитель ядер RSS
 Apply-Tweak "Удаление лимита MaxNumRssCpus" { Remove-ItemProperty -Path $NdisParams -Name "MaxNumRssCpus" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем глобальный ограничитель ядер RSS
-Apply-Tweak "Отключение таймера склеивания пакетов" { Set-ItemProperty -Path $NdisParams -Name "PacketCoalescingTimer" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Отключаем таймер склеивания пакетов
-Apply-Tweak "Включение обхода сетевого стека (PacketDirectEnabled=1)" { Set-ItemProperty -Path $NdisParams -Name "PacketDirectEnabled" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Аналог технологии Intel DPDK.
 
-# Аппаратная привязка сетевых очередей RSS строго к P-ядрам (Исключаем Core 0, индекс 0-базовый)
+# Очистка нерабочих в NDIS 6.x глобальных параметров (реальные буферы и Coalescing задаются на уровне драйвера карты в Разделе 20)
+Apply-Tweak "Очистка невалидных глобальных параметров NDIS\Parameters" {
+    foreach ($badNdisKey in @("NumRcvBuffers", "NumTxBuffers", "MaxNumWorkItems", "NumMacOamPreAllocLog", "PacketCoalescingTimer", "PacketDirectEnabled")) {
+        Remove-ItemProperty -Path $NdisParams -Name $badNdisKey -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    }
+}
+
+# Аппаратная привязка сетевых очередей RSS строго к P-ядрам на основном CCD0 без Core 0 (по реальной карте WinAPI)
+if (-not $global:CpuTopo) { $global:CpuTopo = [CpuTopologyHelper]::GetTopology() }
+[uint64]$rssMask = $global:CpuTopo.PrimaryComputeMask
+if ($rssMask -eq 0) { $rssMask = $global:CpuTopo.FullMask }
+$BaseRSSProcIdx = 0
+$MaxRSSProcIdx  = 0
+for ($bit = 0; $bit -lt 64; $bit++) {
+    if (($rssMask -band ([uint64]1 -shl $bit)) -ne 0) { $BaseRSSProcIdx = $bit; break }
+}
+for ($bit = 63; $bit -ge 0; $bit--) {
+    if (($rssMask -band ([uint64]1 -shl $bit)) -ne 0) { $MaxRSSProcIdx = $bit; break }
+}
+
 $ActiveAdaptersRSS = Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' -and $_.PhysicalMediaType -eq '802.3' }
 foreach ($Adp in $ActiveAdaptersRSS) {
     if (Get-NetAdapterRss -Name $Adp.Name -ErrorAction SilentlyContinue) {
-        $MaxRSSProcIdx = if ($global:TotalLogCores -gt 8) { 7 } else { [math]::Max(2, ($global:TotalLogCores - 1)) }
-        Apply-Tweak "Изоляция RSS-очередей на P-ядрах (2..$MaxRSSProcIdx) для $($Adp.Name)" { 
-            # BaseProcessorNumber 2 означает, что мы запрещаем сети трогать потоки 0 и 1 (Core 0)
-            Set-NetAdapterRss -Name $Adp.Name -BaseProcessorNumber 2 -MaxProcessorNumber $MaxRSSProcIdx -Profile Closest -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 
+        Apply-Tweak "Изоляция RSS-очередей на P-ядрах ($BaseRSSProcIdx..$MaxRSSProcIdx) для $($Adp.Name)" { 
+            Set-NetAdapterRss -Name $Adp.Name -BaseProcessorNumber $BaseRSSProcIdx -MaxProcessorNumber $MaxRSSProcIdx -Profile Closest -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 
         }
     }
 }
@@ -6268,8 +6459,10 @@ Apply-Tweak "Удаление жесткого порога DefaultSendWindow (A
 Apply-Tweak "Оптимизация Fast Path для мелких пакетов (FastSendDatagramThreshold)" { Set-ItemProperty -Path $AfdPath -Name "FastSendDatagramThreshold" -Value 1500 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1500 = Оптимизируем пересылку мелких пакетов (Fast Path)
 Apply-Tweak "Оптимизация копирования мелких пакетов (FastCopyReceiveThreshold)" { Set-ItemProperty -Path $AfdPath -Name "FastCopyReceiveThreshold" -Value 1500 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1500 = Оптимизируем копирование мелких пакетов
 Apply-Tweak "Разрешение динамического управления буферами (DynamicSendBufferDisable=0)" { Set-ItemProperty -Path $AfdPath -Name "DynamicSendBufferDisable" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Разрешаем динамическое управление буферами (Нужно для TCP Window)
-Apply-Tweak "Разрешение динамического управления приемом (DynamicReceiveBufferDisable=0)" { Set-ItemProperty -Path $AfdPath -Name "DynamicReceiveBufferDisable" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Разрешаем динамическое управление
-Apply-Tweak "Включение неблокирующей отправки данных (NonBlockingSendEnabled)" { Set-ItemProperty -Path $AfdPath -Name "NonBlockingSendEnabled" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Включаем неблокирующую отправку данных (Ускоряет работу сокетов)
+Apply-Tweak "Очистка невалидных параметров AFD (DynamicReceiveBufferDisable, NonBlockingSendEnabled)" {
+    Remove-ItemProperty -Path $AfdPath -Name "DynamicReceiveBufferDisable" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    Remove-ItemProperty -Path $AfdPath -Name "NonBlockingSendEnabled" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+}
 Apply-Tweak "Запрет буферизации срочных PSH-битов (Zero Input Lag)" { Set-ItemProperty -Path $AfdPath -Name "IgnorePushBitOnReceives" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = ОС обязана реагировать на срочные PSH-биты, не буферизируя их (Убивает Input Lag сети)
 # 1 = Запрещает драйверу сокетов AFD удерживать буферы сетевой карты, мгновенно возвращая их в кольцо приема RX для защиты от потери UDP-пакетов
 Apply-Tweak "Мгновенный возврат буферов сетевой карты в AFD (DoNotHoldNICBuffers = 1)" { Set-ItemProperty -Path $AfdPath -Name "DoNotHoldNICBuffers" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
@@ -6440,7 +6633,7 @@ Write-Host "====================================================================
 $FS = "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
 Apply-Tweak "Запрет генерации коротких имен 8.3 (NtfsDisable8dot3NameCreation)" { Set-ItemProperty -Path $FS -Name "NtfsDisable8dot3NameCreation" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Запрет записи времени доступа к файлу (NtfsDisableLastAccessUpdate)" { Set-ItemProperty -Path $FS -Name "NtfsDisableLastAccessUpdate" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Отключение телеметрии производительности I/O NTFS" { Set-ItemProperty -Path $FS -Name "NtfsDisableIoPerfTelemetry" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+Apply-Tweak "Очистка невалидного параметра NtfsDisableIoPerfTelemetry" { Remove-ItemProperty -Path $FS -Name "NtfsDisableIoPerfTelemetry" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 # Умная настройка главной файловой таблицы (MFT) в зависимости от типа системного диска
 $SysDrivePart = Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':') -ErrorAction SilentlyContinue
@@ -6456,8 +6649,8 @@ if ($SysDrive -and $SysDrive.MediaType -eq "HDD") {
     Apply-Tweak "Удаление запрета обрезки MFT (Возврат контроля Windows)" { Remove-ItemProperty -Path $FS -Name "NtfsDisableMftShrink" -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
 
-# Фильтры файловой системы
-Apply-Tweak "Отключение фильтра отслеживания имен (FilterEnable)" { Set-ItemProperty -Path $FS -Name "FilterEnable" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключаем фильтр отслеживания имен
+# Очистка невалидного параметра FilterEnable
+Apply-Tweak "Очистка невалидного параметра FilterEnable" { Remove-ItemProperty -Path $FS -Name "FilterEnable" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 # Удаление мусорных твиков (Этих ключей не существует в ядре Windows)
 Apply-Tweak "Удаление мусорного твика NtfsMemoryUsage" { Remove-ItemProperty -Path $FS -Name "NtfsMemoryUsage" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
@@ -6561,6 +6754,17 @@ $StorNvme = "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device"
 if (!(Test-Path $StorNvme)) { Apply-Tweak "Создание раздела драйвера NVMe" { New-Item $StorNvme -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 Apply-Tweak "Удаление лимита запросов LUN для NVMe" { Remove-ItemProperty -Path $StorNvme -Name "MaxIOsPerLun" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем ограничитель запросов на LUN
 
+# Реальное отключение искусственного удержания I/O в очереди StorPort (читается из Services\<miniport>\Parameters)
+foreach ($miniport in @("stornvme", "storahci", "iaStorAC", "iaStorVD")) {
+    $mpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\$miniport\Parameters"
+    if (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\$miniport") {
+        if (!(Test-Path $mpParams)) { New-Item -Path $mpParams -Force | Out-Null }
+        Apply-Tweak "Отключение порога задержки I/O StorPort для $miniport (IoLatencyCap = 0)" {
+            Set-ItemProperty -Path $mpParams -Name "IoLatencyCap" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        }
+    }
+}
+
 # Отказ от EnablePolling: на пользовательских платформах он вызывает DPC-спайки и BSOD.
 $StorNvme = "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device"
 Apply-Tweak "Безопасный режим аппаратных прерываний NVMe" { Set-ItemProperty -Path $StorNvme -Name "EnablePolling" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
@@ -6622,15 +6826,23 @@ if ($global:OptNativeNVMe) {
             Set-ItemProperty -Path $NvmeOverrides -Name "1853569164" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
             Set-ItemProperty -Path $NvmeOverrides -Name "156965516"  -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
         }
-        # Обязательная регистрация класса Storage disks и драйвера nvmedisk в SafeBoot (Minimal и Network), чтобы не сломать Безопасный режим
+        # Обязательная регистрация класса Storage disks и службы nvmedisk в SafeBoot (Minimal и Network), чтобы не сломать Безопасный режим
         foreach ($sbRoot in @("HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal", "HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Network")) {
             $sbGuid = "$sbRoot\{75416E63-5912-4DFA-AE8F-3EFACCAFFB14}"
             $sbSvc  = "$sbRoot\nvmedisk"
             if (!(Test-Path $sbGuid)) { New-Item -Path $sbGuid -Force | Out-Null }
             if (!(Test-Path $sbSvc))  { New-Item -Path $sbSvc  -Force | Out-Null }
-            Apply-Tweak "Регистрация Native NVMe в SafeBoot ($sbRoot)" {
-                Set-Item -Path $sbGuid -Value "Storage disks" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-                Set-Item -Path $sbSvc  -Value "Driver" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+            Grant-RegPermission -RegPath $sbGuid
+            Grant-RegPermission -RegPath $sbSvc
+            try {
+                Apply-Tweak "Регистрация Native NVMe в SafeBoot ($sbRoot)" {
+                    Set-Item -Path $sbGuid -Value "Storage disks" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                    # Для драйвера, регистрируемого по имени службы из Services\nvmedisk, SafeBoot ожидает значение "Service"
+                    Set-Item -Path $sbSvc  -Value "Service" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                }
+            } finally {
+                Restore-RegPermission -RegPath $sbSvc
+                Restore-RegPermission -RegPath $sbGuid
             }
         }
     } elseif ($hasIntelVmd) {
@@ -7076,11 +7288,14 @@ $BthUsbParams = "HKLM:\SYSTEM\CurrentControlSet\Services\BthUsb\Parameters" # П
 if (!(Test-Path $BthUsbParams)) { Apply-Tweak "Создание раздела BthUsb" { New-Item $BthUsbParams -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 | Out-Null } } # Создаем раздел
 Apply-Tweak "Запрет усыпления Bluetooth модулей" { Set-ItemProperty -Path $BthUsbParams -Name "DisableSelectiveSuspend" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Запрет усыпления Bluetooth модулей
 
-# Запрет фонового сканирования Bluetooth (Устранение лагов беспроводных геймпадов DualSense/Xbox)
+# Очистка неподтверждённых параметров в BTHPORT\Parameters
 $BthPort = "HKLM:\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters"
-if (!(Test-Path $BthPort)) { Apply-Tweak "Создание раздела BTHPORT" { New-Item $BthPort -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-Apply-Tweak "Отключение фонового поиска новых Bluetooth-устройств (DisableActiveScanning)" { Set-ItemProperty -Path $BthPort -Name "DisableActiveScanning" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Запрет опроса качества связи Bluetooth (DisableHfpConnectionQualityPolling)" { Set-ItemProperty -Path $BthPort -Name "DisableHfpConnectionQualityPolling" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+if (Test-Path $BthPort) {
+    Apply-Tweak "Очистка невалидных параметров из BTHPORT\Parameters" {
+        Remove-ItemProperty -Path $BthPort -Name "DisableActiveScanning" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        Remove-ItemProperty -Path $BthPort -Name "DisableHfpConnectionQualityPolling" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    }
+}
 
 # Отключение выборочной приостановки для протокола UASP (USB Attached SCSI)
 $UaspParams = "HKLM:\SYSTEM\CurrentControlSet\Services\uasp\Parameters" # Путь к драйверу UASP (внешние SSD)
@@ -7203,39 +7418,91 @@ try {
     $Mice = Get-CimInstance Win32_PointingDevice | Where-Object { $_.PNPDeviceID -match "USB" -or $_.PNPDeviceID -match "HID" }
     
     if ($Mice) {
-        $USBControllers = Get-CimInstance Win32_USBController
+        $USBControllers = Get-CimInstance Win32_USBController | Where-Object { $_.PNPDeviceID -match "^PCI\\" }
         $MouseControllerID = $null
+        $MouseControllerHasAudio = $false
         
         # Извлекаем аппаратные ID вида VID_xxxx&PID_xxxx подключенных мышей
-        $MouseVidPids = $Mice | ForEach-Object { if ($_.PNPDeviceID -match "(VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4})") { $matches[1] } }
+        $MouseVidPids = @($Mice | ForEach-Object { if ($_.PNPDeviceID -match "(VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4})") { [regex]::Escape($matches[1]) } } | Select-Object -Unique)
+        # Извлекаем VID/PID подключённых USB-аудиоустройств (ЦАП / гарнитура), чтобы не зажимать общий с аудио контроллер в 1 вектор / 1 ядро
+        $UsbAudioVidPids = @(Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Where-Object { $_.PNPDeviceID -match "^USB\\" } | ForEach-Object { if ($_.PNPDeviceID -match "(VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4})") { [regex]::Escape($matches[1]) } } | Select-Object -Unique)
 
         foreach ($Ctrl in $USBControllers) {
             $SafeDeviceID = $Ctrl.PNPDeviceID -replace '\\', '\\'
             $AttachedDevices = Get-CimInstance -Query "ASSOCIATORS OF {Win32_USBController.DeviceID='$SafeDeviceID'} WHERE AssocClass=Win32_USBControllerDevice" -ErrorAction SilentlyContinue
+            $hasMouse = $false
+            $hasAudio = $false
             foreach ($Dev in $AttachedDevices) {
                 # Если на этом контроллере сидит устройство с VID/PID нашей мыши
-                if ($MouseVidPids -and ($Dev.PNPDeviceID -match ($MouseVidPids -join '|'))) {
-                    $MouseControllerID = $Ctrl.PNPDeviceID
-                    break
+                if ($MouseVidPids.Count -gt 0 -and ($Dev.PNPDeviceID -match ($MouseVidPids -join '|'))) {
+                    $hasMouse = $true
+                }
+                if ($UsbAudioVidPids.Count -gt 0 -and ($Dev.PNPDeviceID -match ($UsbAudioVidPids -join '|'))) {
+                    $hasAudio = $true
                 }
             }
-            if ($MouseControllerID) { break }
+            if ($hasMouse) {
+                $MouseControllerID = $Ctrl.PNPDeviceID
+                $MouseControllerHasAudio = $hasAudio
+                # Если на одном из контроллеров мышь без USB-аудио — отдаём предпочтение ему
+                if (-not $hasAudio) { break }
+            }
         }
         
-        if ($MouseControllerID) {
+        if ($MouseControllerID -and $MouseControllerID -match "^PCI\\") {
             $MouseCtrlDevParams = "HKLM:\SYSTEM\CurrentControlSet\Enum\$MouseControllerID\Device Parameters"
-            $AffinityKey = "$MouseCtrlDevParams\Interrupt Management\Affinity Policy"
+            $MsiKey             = "$MouseCtrlDevParams\Interrupt Management\MessageSignaledInterruptProperties"
+            $AffinityKey        = "$MouseCtrlDevParams\Interrupt Management\Affinity Policy"
+
+            # Получаем аппаратную топологию CPU (P-Cores, E-Cores, L3/CCD) через WinAPI GetSystemCpuSetInformation
+            if (-not $global:CpuTopo) { $global:CpuTopo = [CpuTopologyHelper]::GetTopology() }
+
+            # Берем маску только первых потоков физических P-ядер на основном CCD0 без Core 0 (исключает E-ядра, SMT/HT и таймеры Core 0)
+            [uint64]$pPhysMask = $global:CpuTopo.PrimaryPhysicalNoCore0Mask
+            if ($pPhysMask -eq 0) { $pPhysMask = [uint64]1 }
+
+            # Выбираем старший (последний) бит из маски — 1 свободное физическое P-ядро (вдали от Core 0 и от RSS сети на CPU 2..7)
+            [uint64]$global:MouseSingleCoreMask = 0
+            if (-not $MouseControllerHasAudio) {
+                for ($bit = 63; $bit -ge 0; $bit--) {
+                    if (($pPhysMask -band ([uint64]1 -shl $bit)) -ne 0) {
+                        $global:MouseSingleCoreMask = ([uint64]1 -shl $bit)
+                        break
+                    }
+                }
+            }
+            $MouseMaskBytes = [BitConverter]::GetBytes($global:MouseSingleCoreMask)
+
             # Захват прав на защищенный раздел Enum контроллера USB
             Grant-RegPermission -RegPath $MouseCtrlDevParams
             try {
                 if (!(Test-Path $AffinityKey)) { New-Item -Path $AffinityKey -Force | Out-Null }
+
                 # DevicePriority = 3 (High): высокий приоритет прерываний контроллера мыши
                 Apply-Tweak "Высший приоритет прерываний контроллера мыши" { Set-ItemProperty -Path $AffinityKey -Name "DevicePriority" -Value 3 -Type DWord -Force }
-                
-                # DevicePolicy = 4 (SpreadMessagesAcrossAllProcessors): равномерное распределение без жесткой маски
-                Apply-Tweak "Балансировка прерываний USB-контроллера по всем ядрам (Защита аудио ЦАП)" {
-                    Remove-ItemProperty -Path $AffinityKey -Name "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue
-                    Set-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Value 4 -Type DWord -Force
+
+                if ($MouseControllerHasAudio) {
+                    Write-Host " ► [Защита USB Audio] Мышь делит контроллер xHCI с USB-аудиоустройством: одноядерная привязка отключена." -ForegroundColor Yellow
+                    Apply-Tweak "Снятие одновекторного/одноядерного ограничения для общего USB-контроллера мыши и аудио" {
+                        if (Test-Path $MsiKey) { Remove-ItemProperty -Path $MsiKey -Name "MessageNumberLimit" -Force -ErrorAction SilentlyContinue }
+                        Remove-ItemProperty -Path $AffinityKey -Name "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue
+                        Set-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Value 0 -Type DWord -Force
+                    }
+                } else {
+                    # Если контроллер поддерживает MSI/MSI-X (MSISupported = 1 из Раздела 17), ограничиваем до 1 вектора (MessageNumberLimit = 1),
+                    # чтобы многоочередной MSI-X контроллер xHCI направлял прерывания строго на 1 выбранное ядро
+                    if ((Test-Path $MsiKey) -and ((Get-ItemProperty -Path $MsiKey -Name "MSISupported" -ErrorAction SilentlyContinue).MSISupported -eq 1)) {
+                        Apply-Tweak "Фиксация 1 вектора прерывания USB-контроллера мыши (MessageNumberLimit = 1)" {
+                            Set-ItemProperty -Path $MsiKey -Name "MessageNumberLimit" -Value 1 -Type DWord -Force
+                        }
+                    }
+
+                    # DevicePolicy = 4 (IrqPolicySpecifiedProcessors): привязка прерываний строго к маске AssignmentSetOverride
+                    # AssignmentSetOverride (REG_BINARY, 8 байт little-endian): битовая маска ровно 1 физического P-ядра
+                    Apply-Tweak ("Привязка прерываний USB-контроллера мыши к 1 физическому P-ядру (Маска 0x{0:X})" -f $global:MouseSingleCoreMask) {
+                        Set-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Value 4 -Type DWord -Force
+                        Set-ItemProperty -Path $AffinityKey -Name "AssignmentSetOverride" -Value $MouseMaskBytes -Type Binary -Force
+                    }
                 }
             } finally {
                 Restore-RegPermission -RegPath $MouseCtrlDevParams
@@ -7273,11 +7540,13 @@ Apply-Tweak "Отключение акселерации мыши на экра�
 # Возврат дефолтных и безопасных алгоритмов считывания мыши (Защита от жесткости и статтеров)
 Apply-Tweak "Удаление жестких графиков X-оси мыши (Zero Stiffness)" { Remove-ItemProperty -Path $MouseKey -Name "SmoothMouseXCurve" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Удаление жестких графиков Y-оси мыши (Zero Stiffness)" { Remove-ItemProperty -Path $MouseKey -Name "SmoothMouseYCurve" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-# В Windows 11 RawMouseThrottleEnabled = 1 ограничивает частоту опроса ТОЛЬКО для фоновых приложений (Discord, браузеры, оверлеи) до 50 Hz (Duration = 20 мс),
-# оставляя 100% частоты 1000-8000 Hz активному окну игры. Установка 0 провоцирует фризы при резких движениях мыши!
-Apply-Tweak "Защита активной игры от фонового опроса мыши 1000-8000Hz (RawMouseThrottleEnabled = 1)" {
-    Set-ItemProperty -Path $MouseKey -Name "RawMouseThrottleEnabled" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-    Set-ItemProperty -Path $MouseKey -Name "RawMouseThrottleDuration" -Value 20 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+
+# Для мышей до 1000 Hz полностью отключаем троттлинг Raw Input Windows 11 (RawMouseThrottleEnabled = 0) и убираем Duration = 20 (50 Hz),
+# чтобы игры с нестандартным/отдельным потоком ввода не были ошибочно порезаны системой до 50 или 125 Hz.
+# (ПРИМЕЧАНИЕ: если используете мышь 4000-8000 Hz с тяжелым фоном Discord/OBS, удалите все три ключа — будет штатный стандарт Win 11: 125 Hz для фона)
+Apply-Tweak "Чистый Raw Input без системного троттлинга Windows 11 (RawMouseThrottleEnabled = 0)" {
+    Set-ItemProperty -Path $MouseKey -Name "RawMouseThrottleEnabled" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    Remove-ItemProperty -Path $MouseKey -Name "RawMouseThrottleDuration" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
 }
 Apply-Tweak "Сброс форсированного троттлинга мыши" { Remove-ItemProperty -Path $MouseKey -Name "RawMouseThrottleForced" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
@@ -7305,20 +7574,21 @@ if ($global:systemParamInfo) {
     Apply-Tweak "Мгновенное отключение повышенной точности указателя" { [Win32Functions.Win32SystemParamInfo]::SystemParametersInfo(0x0004, 0, $mouseParams, 3) | Out-Null }
 }
 
-# Настройки ввода: отключаем сглаживание (coalescing) согласованно в обеих ветках и оставляем точный ввод EnableHighResolutionMouse = 1
+# Настройки ввода: сохраняем штатное объединение оконных WM_MOUSEMOVE (убираем EnableMouseInputCoalescing = 0 во избежание флуда UI, дёрганья ПКМ и ложных срабатываний анти-макрос систем)
 $InputGamepad = "HKLM:\SOFTWARE\Microsoft\Input\Settings\Controller"
 if (!(Test-Path $InputGamepad)) { Apply-Tweak "Создание раздела Controller Input" { New-Item -Path $InputGamepad -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 
-# EnableMouseInputCoalescing = 0: запрещаем объединение событий перемещения мыши (без противоречия с TCX)
-Apply-Tweak "Отключение объединения событий мыши в Input\Controller (EnableMouseInputCoalescing = 0)" { Set-ItemProperty -Path $InputGamepad -Name "EnableMouseInputCoalescing" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+# Удаляем принудительное отключение coalescing (на Raw Input в играх это не влияет, но спасает UI/меню и кнопки от дребезга)
+Apply-Tweak "Возврат штатного объединения оконного ввода в Input\Controller (удаление EnableMouseInputCoalescing)" { Remove-ItemProperty -Path $InputGamepad -Name "EnableMouseInputCoalescing" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 # EnableHighResolutionMouse = 1: сохраняем поддержку субпиксельной точности и высокочастотных игровых мышей
 Apply-Tweak "Сохранение точного ввода высокой четкости (EnableHighResolutionMouse = 1)" { Set-ItemProperty -Path $InputGamepad -Name "EnableHighResolutionMouse" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 # CursorEmulationEnabled = 0: отключает лишнюю эмуляцию курсора со стороны геймпада
 Apply-Tweak "Отключение эмуляции курсора (CursorEmulationEnabled = 0)" { Set-ItemProperty -Path $InputGamepad -Name "CursorEmulationEnabled" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 $InputMouse = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\TCX"
-if (!(Test-Path $InputMouse)) { Apply-Tweak "Создание раздела TCX" { New-Item -Path $InputMouse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-Apply-Tweak "Отключение аппаратного сглаживания ввода мыши в TCX (EnableMouseInputCoalescing = 0)" { Set-ItemProperty -Path $InputMouse -Name "EnableMouseInputCoalescing" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+if (Test-Path $InputMouse) {
+    Apply-Tweak "Возврат штатного объединения оконного ввода в TCX (удаление EnableMouseInputCoalescing)" { Remove-ItemProperty -Path $InputMouse -Name "EnableMouseInputCoalescing" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+}
 
 # Разблокировка буфера Win32k для 8000Hz периферии
 $WinNT = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows" # Ветка Windows
@@ -7369,10 +7639,9 @@ Apply-Tweak "Отключение кругов курсора (MouseSonar)" { Se
 Apply-Tweak "Отключение скрытия курсора (MouseVanish)" { Set-ItemProperty -Path $MousePanel -Name "MouseVanish" -Value "0" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Отключение шлейфа курсора (MouseTrails)" { Set-ItemProperty -Path $MousePanel -Name "MouseTrails" -Value "0" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Отключение системного писка мыши (Beep)" { Set-ItemProperty -Path $MousePanel -Name "Beep" -Value "0" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-Apply-Tweak "Отключение инверсии кнопок мыши (SwapMouseButtons)" { Set-ItemProperty -Path $MousePanel -Name "SwapMouseButtons" -Value "0" -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 $Flags = 3
-Apply-Tweak "Аппаратное отключение тени курсора мыши (SPI_SETCURSORSHADOW)" { [void][UIAnim]::SystemParametersInfo(0x1017, 0, [IntPtr]0, $Flags) }
+Apply-Tweak "Аппаратное отключение тени курсора мыши (SPI_SETCURSORSHADOW)" { [void][UIAnim]::SystemParametersInfo(0x101B, 0, [IntPtr]0, $Flags) } # 0x101B = SPI_SETCURSORSHADOW (0x1017 был SPI_SETTOOLTIPANIMATION)
 
 # Оптимизация Сенсоров/Тачпадов
 $Touch = "HKCU:\Software\Microsoft\Wisp\Touch"
@@ -7476,30 +7745,17 @@ foreach ($App in $RestoreSafeApps) {
     }
 }
 
-if (-not $global:OptAntiCheat) {
-    $BlockExes = @("sethc.exe", "utilman.exe", "Narrator.exe", "Magnify.exe", "HelpPane.exe", "winhlp32.exe", "WerFault.exe")
-    foreach ($Exe in $BlockExes) {
-        $IfeoPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$Exe"
-        $SilentPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\$Exe"
-        
-        if (!(Test-Path $IfeoPath)) { Apply-Tweak "Создание IFEO для $Exe" { New-Item -Path $IfeoPath -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-        if (!(Test-Path $SilentPath)) { Apply-Tweak "Создание SilentProcessExit для $Exe" { New-Item -Path $SilentPath -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-        
-        Apply-Tweak "Блокировка $Exe (Silent Process Exit)" { Set-ItemProperty -Path $IfeoPath -Name "GlobalFlag" -Value 512 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-        Apply-Tweak "Тихое убийство $Exe" { Set-ItemProperty -Path $SilentPath -Name "ReportingMode" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    }
-} else {
-    $BlockExes = @("sethc.exe", "utilman.exe", "Narrator.exe", "Magnify.exe", "HelpPane.exe", "winhlp32.exe", "WerFault.exe")
-    foreach ($Exe in $BlockExes) {
-        $IfeoPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$Exe"
-        $SilentPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\$Exe"
-        
-        Apply-Tweak "Удаление IFEO для $Exe (Режим Античита)" { if (Test-Path -LiteralPath $IfeoPath) { Remove-Item -LiteralPath $IfeoPath -Recurse -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-        Apply-Tweak "Удаление SilentProcessExit для $Exe (Режим Античита)" { if (Test-Path -LiteralPath $SilentPath) { Remove-Item -LiteralPath $SilentPath -Recurse -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-    }
+# Очищаем фиктивный GlobalFlag=512 / SilentProcessExit (StickyKeys уже выключены выше через Flags=504, а WerFault — через WerSvc и WER в Разделах 41 и 78)
+$BlockExes = @("sethc.exe", "utilman.exe", "Narrator.exe", "Magnify.exe", "HelpPane.exe", "winhlp32.exe", "WerFault.exe")
+foreach ($Exe in $BlockExes) {
+    $IfeoPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$Exe"
+    $SilentPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\$Exe"
+    
+    Apply-Tweak "Очистка IFEO (GlobalFlag) для $Exe" { if (Test-Path -LiteralPath $IfeoPath) { Remove-Item -LiteralPath $IfeoPath -Recurse -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
+    Apply-Tweak "Очистка SilentProcessExit для $Exe" { if (Test-Path -LiteralPath $SilentPath) { Remove-Item -LiteralPath $SilentPath -Recurse -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 }
 
-# Отключение "магнетизма" курсора (Убирает залипание и скрытые задержки мыши в Win 11)
+# Отключение "магнетизма" курсора
 $CursorMagnetism = "HKLM:\SOFTWARE\Microsoft\Input\Settings\ControllerProcessor\CursorMagnetism"
 if (!(Test-Path $CursorMagnetism)) { Apply-Tweak "Создание раздела CursorMagnetism" { New-Item -Path $CursorMagnetism -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 Apply-Tweak "Отключение области притяжения курсора (AttractionRectInsetInDIPS)" { Set-ItemProperty -Path $CursorMagnetism -Name "AttractionRectInsetInDIPS" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
@@ -7636,6 +7892,15 @@ $global:CpuTopo = [CpuTopologyHelper]::GetTopology()
 # PrimaryPhysicalNoCore0Mask = только первые физические потоки P-Cores / CCD0 без Core 0 (исключает E-Cores и SMT/HT-потоки)
 [uint64]$GpuMask = $global:CpuTopo.PrimaryPhysicalNoCore0Mask
 if ($GpuMask -eq 0) { $GpuMask = [uint64]1 }
+
+# Исключаем выделенное 1 физическое P-ядро контроллера мыши из маски видеокарты (если у GPU остаются другие P-ядра),
+# чтобы прерывания видеокарты и мыши не делили одно ядро
+if ($global:MouseSingleCoreMask -and ($global:MouseSingleCoreMask -ne 0)) {
+    [uint64]$GpuMaskWithoutMouse = $GpuMask -band (-bnot $global:MouseSingleCoreMask)
+    if ($GpuMaskWithoutMouse -ne 0) {
+        $GpuMask = $GpuMaskWithoutMouse
+    }
+}
 
 Write-Host (" ► Маска прерываний GPU по данным ядра: 0x{0:X} (Hybrid={1}, MultiLLC={2}, SMT={3})" -f $GpuMask, $global:CpuTopo.HasHybridCores, $global:CpuTopo.HasMultipleLlc, $global:CpuTopo.HasSmt) -ForegroundColor DarkGray
 
@@ -7968,8 +8233,12 @@ if ([Environment]::UserInteractive -and $env:USERNAME -ne "SYSTEM" -and -not $gl
             if (Test-Path -LiteralPath $FolderPath) { # Проверяем, существует ли папка физически
                 try {
                     # 1. Добавление в исключения Защитника Windows (Устраняет I/O задержки при чтении файлов игры)
-                    Apply-Tweak "Удаление старого исключения Защитника для $FolderPath" { Remove-MpPreference -ExclusionPath $FolderPath -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем старую запись, если была
-                    Apply-Tweak "Добавление папки $FolderPath в исключения Защитника" { Add-MpPreference -ExclusionPath $FolderPath -ErrorAction Stop *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Добавляем папку в белый список
+                    if ((Get-Service -Name "WinDefend" -ErrorAction SilentlyContinue).Status -eq 'Running') {
+                        Apply-Tweak "Удаление старого исключения Защитника для $FolderPath" { Remove-MpPreference -ExclusionPath $FolderPath -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем старую запись, если была
+                        Apply-Tweak "Добавление папки $FolderPath в исключения Защитника" { Add-MpPreference -ExclusionPath $FolderPath -ErrorAction Stop *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Добавляем папку в белый список
+                    } else {
+                        Apply-Tweak "Добавление папки $FolderPath в исключения Защитника" { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+                    }
                     
                     # 2. Интеграция BypassIO (Технология DirectStorage для Windows 11)
                     $OSBuild = [System.Environment]::OSVersion.Version.Build
@@ -7977,7 +8246,8 @@ if ([Environment]::UserInteractive -and $env:USERNAME -ne "SYSTEM" -and -not $gl
                         Write-Host "Проверка поддержки BypassIO (DirectStorage)..." -ForegroundColor DarkGray -NoNewline
                         $SafeBypassPath = if ($FolderPath -match '^[a-zA-Z]:\\?$') { $FolderPath.TrimEnd('\', ':') + ":" } else { $FolderPath.TrimEnd('\') }
                         $global:LASTEXITCODE = 0
-                        $BypassState = cmd /c "fsutil bypassio state $SafeBypassPath 2>&1" | Out-String
+                        # Обязательны кавычки вокруг пути на случай пробелов (например, "D:\Steam Library")
+                        $BypassState = cmd /c "fsutil bypassio state `"$SafeBypassPath`" 2>&1" | Out-String
                         if ($BypassState -match "(?i)Not supported|не поддерживается|disabled") {
                             Write-Host " [НЕ ПОДДЕРЖИВАЕТСЯ ДИСКОМ]" -ForegroundColor Yellow
                             Write-Host "* Убедитесь, что игра установлена на NVMe SSD, а не на HDD/SATA." -ForegroundColor DarkGray
@@ -8144,13 +8414,16 @@ if (Get-Service -Name "amd3dvcacheSvc" -ErrorAction SilentlyContinue) {
 # Отключение программного звука System Speaker
 $SystemSpeaker = Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match "PNP0800" }
 if ($SystemSpeaker) {
-    $SpeakerKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($SystemSpeaker.InstanceId)\Device Parameters"
-    Grant-RegPermission -RegPath $SpeakerKey
-    try {
-        if (!(Test-Path $SpeakerKey)) { Apply-Tweak "Создание раздела Device Parameters для спикера" { New-Item -Path $SpeakerKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-        Apply-Tweak "Программное отключение системного динамика (System Speaker)" { Set-ItemProperty -Path $SpeakerKey -Name "Beep" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключаем системные писки из спикера
-    } finally {
-        Restore-RegPermission -RegPath $SpeakerKey
+    # Перебираем в цикле, чтобы при наличии нескольких записей PNP0800 путь реестра не склеился из массива
+    foreach ($Spk in @($SystemSpeaker)) {
+        $SpeakerKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Spk.InstanceId)\Device Parameters"
+        Grant-RegPermission -RegPath $SpeakerKey
+        try {
+            if (!(Test-Path $SpeakerKey)) { Apply-Tweak "Создание раздела Device Parameters для спикера" { New-Item -Path $SpeakerKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
+            Apply-Tweak "Программное отключение системного динамика (System Speaker)" { Set-ItemProperty -Path $SpeakerKey -Name "Beep" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключаем системные писки из спикера
+        } finally {
+            Restore-RegPermission -RegPath $SpeakerKey
+        }
     }
 }
 
@@ -8217,21 +8490,6 @@ $UselessServices = @(
     "WerSvc",               # Служба регистрации ошибок Windows (Error Reporting)
     "InventorySvc"          # [Win11 24H2-26H2] Служба фоновой инвентаризации и оценки совместимости (вызывает периодические всплески нагрузки на диск и CPU)
 )
-
-# Если режим ИИ не выбран — переводим новую службу диспетчера сессий рабочих нагрузок ИИ (WsmSvc в 25H2/26H2) в ручной режим
-if (Get-Service -Name "WsmSvc" -ErrorAction SilentlyContinue) {
-    if (-not $global:OptAI) {
-        Apply-Tweak "Перевод службы диспетчера нагрузок WsmSvc (26H2) в ручной режим" {
-            Stop-Service -Name "WsmSvc" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-            Set-Service -Name "WsmSvc" -StartupType Manual *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-        }
-    } else {
-        Apply-Tweak "Возврат автозапуска службы диспетчера нагрузок WsmSvc (Режим ИИ)" {
-            Set-Service -Name "WsmSvc" -StartupType Automatic *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-            Start-Service -Name "WsmSvc" -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-        }
-    }
-}
 
 foreach ($Svc in $UselessServices) {
     if (Get-Service -Name $Svc -ErrorAction SilentlyContinue) {
@@ -8384,15 +8642,21 @@ Apply-Tweak "Включение независимого расчета тико
 # На ПК под Windows 11 22H2+ значение 1 ОБЯЗАТЕЛЬНО, чтобы запрос таймера 0.5 мс от Thread Director действовал на игру глобально (при 0 он ограничен только процессом-инициатором); на ноутбуках оставляем 0 для экономии батареи
 $GlobalTimerReq = if ($global:IsLaptop) { 0 } else { 1 }
 Apply-Tweak "Настройка глобального разрешения системного таймера (GlobalTimerResolutionRequests = $GlobalTimerReq)" { Set-ItemProperty -Path $KernelPath -Name "GlobalTimerResolutionRequests" -Value $GlobalTimerReq -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-if ($global:IsLaptop) {
-    Apply-Tweak "Привязка истечения системных таймеров к Core 0 (SerializeTimerExpiration = 0)" { Set-ItemProperty -Path $KernelPath -Name "SerializeTimerExpiration" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+
+$powerAvailSection = ((cmd.exe /c "powercfg /a 2>&1" | Out-String) -split '(?i)not available|недоступн')[0]
+$hasModernStandby = ($powerAvailSection -match '\bS0\b')
+$global:LASTEXITCODE = 0
+if ($global:IsLaptop -or $hasModernStandby) {
+    # 0 = Auto: на ноутбуках и системах с Modern Standby (S0) оставляем штатное поведение
+    Apply-Tweak "Штатная сериализация системных таймеров для S0/ноутбука (SerializeTimerExpiration = 0)" { Set-ItemProperty -Path $KernelPath -Name "SerializeTimerExpiration" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 } else {
-    Apply-Tweak "Привязка истечения системных таймеров к Core 0 (SerializeTimerExpiration = 1)" { Set-ItemProperty -Path $KernelPath -Name "SerializeTimerExpiration" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Жестко запирает обработку истечения системных таймеров на Core 0 (защищает изолированные игровые P-ядра от таймерных DPC)
+    # 2 = Off: на обычных ПК (S3) распределяем истечение таймеров по активным ядрам, снимая перегрузку с Core 0
+    Apply-Tweak "Распределение истечения системных таймеров с разгрузкой Core 0 (SerializeTimerExpiration = 2)" { Set-ItemProperty -Path $KernelPath -Name "SerializeTimerExpiration" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
 
-# Блокировка SRNW (System Resource Notify Window)
+# Очистка неподтверждённого ключа DisableSRNW из Session Manager\kernel
 $Kernel = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"
-Apply-Tweak "Блокировка окна SRNW (System Resource Notify Window)" { Set-ItemProperty -Path $Kernel -Name "DisableSRNW" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+Apply-Tweak "Очистка невалидного ключа DisableSRNW из ядра" { Remove-ItemProperty -Path $Kernel -Name "DisableSRNW" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 $SppKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform" # Служба защиты лицензий ПО
 if (Test-Path $SppKey) { 
@@ -8417,10 +8681,10 @@ if ($global:TotalRAM -lt 16) {
     Apply-Tweak "Изоляция служб svchost (Больше 16GB RAM)" { Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control" -Name "SvcHostSplitThresholdInKB" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # При 16+ ГБ удаляем лимит, службы будут изолированы друг от друга
 }
 
-# Изоляция служб: Запрещаем службам уходить в файл подкачки
+# Очистка невалидного ключа DisablePagefileSwap из ветки Svchost
 $SvcHostKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost" # Ветка хоста
 Apply-Tweak "Захват прав на раздел Svchost" { Grant-RegPermission -RegPath $SvcHostKey } # Взламываем права
-Apply-Tweak "Запрет выгрузки служб в файл подкачки (DisablePagefileSwap)" { Set-ItemProperty -Path $SvcHostKey -Name "DisablePagefileSwap" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Запрет Paging'а (держать только в RAM)
+Apply-Tweak "Очистка невалидного ключа DisablePagefileSwap из Svchost" { Remove-ItemProperty -Path $SvcHostKey -Name "DisablePagefileSwap" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Возврат прав на раздел Svchost" { Restore-RegPermission -RegPath $SvcHostKey } # Восстанавливаем права
 
 # Автоматическая настройка файла подкачки (Pagefile)
@@ -8465,25 +8729,14 @@ try {
 # Полное отключение Swapfile.sys (Файл подкачки UWP)
 Apply-Tweak "Отключение файла подкачки UWP (SwapfileControl)" { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "SwapfileControl" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Устраняет фоновый I/O шум от Metro-приложений
 
-# Блокировка системного ИИ Windows 11 (aihost.exe)
-if (-not $global:OptAntiCheat) {
-    $AIHost = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\aihost.exe" # Путь IFEO
-    $AIHostSilent = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\aihost.exe" # Путь перенаправления
-    
-    if (!(Test-Path $AIHost)) { Apply-Tweak "Создание IFEO для aihost.exe" { New-Item -Path $AIHost -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-    if (!(Test-Path $AIHostSilent)) { Apply-Tweak "Создание SilentProcessExit для aihost.exe" { New-Item -Path $AIHostSilent -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-    
-    Apply-Tweak "Блокировка системного ИИ Windows (aihost.exe) через GlobalFlag" { Set-ItemProperty -Path $AIHost -Name "GlobalFlag" -Value 512 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 512 = Разрешить Silent Process Exit
-    Apply-Tweak "Тихое убийство aihost.exe (ReportingMode)" { Set-ItemProperty -Path $AIHostSilent -Name "ReportingMode" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Не отправлять отчеты об ошибках, просто убить процесс в памяти
-} else {
-    $AiHostIfeo = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\aihost.exe"
-    $AiHostSilent = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\aihost.exe"
-    if (Test-Path $AiHostIfeo) {
-        Apply-Tweak "Восстановление aihost.exe IFEO (Режим Античита)" { Remove-Item -LiteralPath $AiHostIfeo -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    }
-    if (Test-Path $AiHostSilent) {
-        Apply-Tweak "Восстановление aihost.exe SilentProcessExit (Режим Античита)" { Remove-Item -LiteralPath $AiHostSilent -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    }
+# Очищаем фиктивный GlobalFlag=512 / SilentProcessExit (компоненты Windows AI, Recall и локальные модели штатно отключаются политиками и DISM в Разделе 48)
+$AiHostIfeo = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\aihost.exe"
+$AiHostSilent = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\aihost.exe"
+if (Test-Path $AiHostIfeo) {
+    Apply-Tweak "Очистка IFEO (GlobalFlag) для aihost.exe" { Remove-Item -LiteralPath $AiHostIfeo -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+}
+if (Test-Path $AiHostSilent) {
+    Apply-Tweak "Очистка SilentProcessExit для aihost.exe" { Remove-Item -LiteralPath $AiHostSilent -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
 
 # Отключение фонового обновления групповых политик
@@ -8513,31 +8766,22 @@ Write-Host "====================================================================
 $ProcName = ($global:ProcInfo).Name # Получаем имя процессора
 if ($ProcName -match "Intel" -and ($ProcName -match "12\d{2}" -or $ProcName -match "13\d{2}" -or $ProcName -match "14\d{2}" -or $ProcName -match "Ultra")) {
     
-    # Прямой откат DevicePolicy для звуковых устройств от предыдущего запуска
+    # Прямой откат DevicePolicy для звуковых устройств от предыдущего запуска с захватом прав SYSTEM на Device Parameters
     $OldAudioAffinityDevices = Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Where-Object { $_.PNPDeviceID -match "^HDAUDIO" -or $_.PNPDeviceID -match "^PCI" }
     if ($OldAudioAffinityDevices) {
         foreach ($Device in $OldAudioAffinityDevices) {
             if ($Device.PNPDeviceID) {
-                $AffinityKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Device.PNPDeviceID)\Device Parameters\Interrupt Management\Affinity Policy"
+                $AudioDevParams = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Device.PNPDeviceID)\Device Parameters"
+                $AffinityKey = "$AudioDevParams\Interrupt Management\Affinity Policy"
                 if (Test-Path $AffinityKey) {
-                    Apply-Tweak "Откат политики прерываний для $($Device.Name)" { Remove-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                    Apply-Tweak "Удаление жесткой маски прерываний для $($Device.Name)" { Remove-ItemProperty -Path $AffinityKey -Name "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                    Grant-RegPermission -RegPath $AudioDevParams
+                    try {
+                        Apply-Tweak "Откат политики прерываний для $($Device.Name)" { Remove-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                        Apply-Tweak "Удаление жесткой маски прерываний для $($Device.Name)" { Remove-ItemProperty -Path $AffinityKey -Name "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                    } finally {
+                        Restore-RegPermission -RegPath $AudioDevParams
+                    }
                 }
-            }
-        }
-    }
-
-    $AllTargetDevices = @() # Инициализируем массив
-    $AllTargetDevices += Get-CimInstance Win32_SCSIController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "NVMe" -or $_.Name -match "NVM Express" }
-
-    if ($AllTargetDevices) {
-        foreach ($Device in $AllTargetDevices) {
-            if ($Device.PNPDeviceID) {
-                $AffinityKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Device.PNPDeviceID)\Device Parameters\Interrupt Management\Affinity Policy"
-                if (!(Test-Path $AffinityKey)) { Apply-Tweak "Создание раздела Affinity Policy для $($Device.Name)" { New-Item -Path $AffinityKey -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-                
-                Apply-Tweak "Распределение прерываний (Spread) для $($Device.Name)" { Set-ItemProperty -Path $AffinityKey -Name "DevicePolicy" -Value 5 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 5 = IrqPolicySpreadMessagesAcrossAllProcessors
-                Apply-Tweak "Удаление жесткой маски прерываний для $($Device.Name)" { Remove-ItemProperty -Path $AffinityKey -Name "AssignmentSetOverride" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем жесткие маски привязки
             }
         }
     }
@@ -8592,13 +8836,28 @@ foreach ($Logger in $AllLoggers) {
 }
 Apply-Tweak "Возврат прав на раздел Autologger" { Restore-RegPermission -RegPath $AutoLoggersPath }
 
-# Оптимизация квот WMI и изоляция (Защита от фризов WmiPrvSE.exe)
+# Очистка невалидных параметров из Wbem\CIMOM и защита/лечение списка восстановления WMI (Autorecover MOFs)
 $WmiCimom = "HKLM:\SOFTWARE\Microsoft\Wbem\CIMOM"
 if (Test-Path $WmiCimom) {
-    Apply-Tweak "Увеличение лимита активных задач WMI" { Set-ItemProperty -Path $WmiCimom -Name "MaxActiveTaskCount" -Value 128 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 128 = Увеличиваем лимит активных задач, чтобы очередь не тормозила систему
-    Apply-Tweak "Увеличение лимита памяти для WMI-запросов" { Set-ItemProperty -Path $WmiCimom -Name "MaxMemoryPerRequest" -Value 134217728 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 128 MB = Увеличиваем лимит ОЗУ для одного WMI-запроса
-    Apply-Tweak "Изоляция провайдеров WMI (AutoIsolate)" { Set-ItemProperty -Path $WmiCimom -Name "AutoIsolate" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Изолируем провайдеры
-    Apply-Tweak "Отключение автовосстановления MOF-файлов" { Set-ItemProperty -Path $WmiCimom -Name "Autorecover MOFs" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключаем автовосстановление MOF-файлов
+    Apply-Tweak "Очистка невалидных параметров CIMOM (MaxActiveTaskCount, MaxMemoryPerRequest, AutoIsolate)" {
+        Remove-ItemProperty -Path $WmiCimom -Name "MaxActiveTaskCount" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        Remove-ItemProperty -Path $WmiCimom -Name "MaxMemoryPerRequest" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        Remove-ItemProperty -Path $WmiCimom -Name "AutoIsolate" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    }
+
+    try {
+        $cimomKey = Get-Item -LiteralPath $WmiCimom -ErrorAction SilentlyContinue
+        if ($cimomKey -and (@($cimomKey.GetValueNames()) -contains "Autorecover MOFs") -and ($cimomKey.GetValueKind("Autorecover MOFs").ToString() -ne "MultiString")) {
+            Apply-Tweak "Восстановление повреждённого списка Autorecover MOFs (REG_MULTI_SZ)" {
+                $mofFiles = @(Get-ChildItem -Path "$env:SystemRoot\System32\wbem" -Include *.mof, *.mfl -File -ErrorAction SilentlyContinue |
+                    Where-Object { Select-String -LiteralPath $_.FullName -Pattern '^\s*#pragma\s+autorecover' -Quiet -ErrorAction SilentlyContinue } |
+                    Select-Object -ExpandProperty FullName)
+                if ($mofFiles.Count -gt 0) {
+                    Set-ItemProperty -Path $WmiCimom -Name "Autorecover MOFs" -Value ([string[]]$mofFiles) -Type MultiString -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                }
+            }
+        }
+    } catch {}
 }
 
 # Отключение Intel GNA (Gaussian & Neural Accelerator)
@@ -8687,9 +8946,6 @@ $wshell = New-Object -ComObject Wscript.Shell
 
 $global:IsRU = ((Get-UICulture).TwoLetterISOLanguageName -eq "ru")
 function L ([string]$Ru, [string]$En) { if ($global:IsRU) { return $Ru } else { return $En } }
-
-# Путь к зарегистрированному пункту контекстного меню в реестре
-$MenuKey = "Registry::HKEY_CLASSES_ROOT\exefile\shell\EastricaToggleFirewall"
 
 # Генерируем уникальное детерминированное имя правила на основе полного пути к файлу
 $PathBytes = [System.Text.Encoding]::UTF8.GetBytes($TargetApp.ToLowerInvariant())
@@ -9007,55 +9263,6 @@ Apply-Tweak "Точечная блокировка опасных входящи
                         -ErrorAction Stop | Out-Null
 
     # ==============================================================================
-    # 17. НЕЙТРАЛИЗАЦИЯ УТЕЧКИ NTLM ЧЕРЕЗ WEBDAV (СЛУЖБА WEBCLIENT)
-    # ==============================================================================
-    # Запрещает передачу хэшей авторизации по портам HTTP/HTTPS (80/443) в обход блокировки SMB
-    if (Get-Service -Name "WebClient" -ErrorAction SilentlyContinue) {
-        Apply-Tweak "Остановка службы WebClient (Блокировка WebDAV NTLM Leak)" {
-            Stop-Service -Name "WebClient" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-            Set-Service -Name "WebClient" -StartupType Disabled *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient" -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-        }
-    }
-
-    # ==============================================================================
-    # 18. БЛОКИРОВКА SMB OVER QUIC (ЗАЩИТА ОТ ОБХОДА ЧЕРЕЗ UDP 443 В WIN 11)
-    # ==============================================================================
-    $LanmanWorkstation = "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters"
-    if (Test-Path $LanmanWorkstation) {
-        Apply-Tweak "Запрет передачи SMB-трафика через QUIC (UDP 443)" {
-            Set-ItemProperty -Path $LanmanWorkstation -Name "DisableSmbQuic" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-        }
-    }
-
-    # ==============================================================================
-    # 19. АКТИВАЦИЯ РЕЖИМА НЕВИДИМКИ (STEALTH MODE ДЛЯ ВСЕХ ПРОФИЛЕЙ)
-    # ==============================================================================
-    # Запрещает Windows отвечать пакетами TCP RST и ICMP Unreachable на закрытые порты
-    $FirewallProfiles = @(
-        "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile",
-        "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile",
-        "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile"
-    )
-    foreach ($EastricaProfile in $FirewallProfiles) {
-        if (Test-Path $EastricaProfile) {
-            Apply-Tweak "Включение Stealth Mode (Скрытие ПК от сканеров портов)" {
-                Set-ItemProperty -Path $EastricaProfile -Name "DisableStealthMode" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-            }
-        }
-    }
-
-    # ==============================================================================
-    # 20. ЗАПРЕТ НЕБЕЗОПАСНОГО ГОСТЕВОГО ВХОДА SMB (ANTI-INSECURE GUEST FALLBACK)
-    # ==============================================================================
-    # Защищает от MitM-атак, когда поддельный сервер в сети принудительно сбрасывает авторизацию до гостя
-    $LanmanPol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation"
-    if (!(Test-Path $LanmanPol)) { New-Item -Path $LanmanPol -Force | Out-Null }
-    Apply-Tweak "Запрет небезопасного гостевого входа SMB (Insecure Guest Auth)" {
-        Set-ItemProperty -Path $LanmanPol -Name "AllowInsecureGuestAuth" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-    }
-
-    # ==============================================================================
     # ДОПОЛНИТЕЛЬНЫЕ ПРАВИЛА
     # ==============================================================================
 
@@ -9098,6 +9305,55 @@ Apply-Tweak "Точечная блокировка опасных входящи
                         -Profile Any `
                         -Enabled True `
                         -ErrorAction Stop | Out-Null
+}
+
+# ==============================================================================
+# 17. НЕЙТРАЛИЗАЦИЯ УТЕЧКИ NTLM ЧЕРЕЗ WEBDAV (СЛУЖБА WEBCLIENT)
+# ==============================================================================
+# Запрещает передачу хэшей авторизации по портам HTTP/HTTPS (80/443) в обход блокировки SMB
+if (Get-Service -Name "WebClient" -ErrorAction SilentlyContinue) {
+    Apply-Tweak "Остановка службы WebClient (Блокировка WebDAV NTLM Leak)" {
+        Stop-Service -Name "WebClient" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        Set-Service -Name "WebClient" -StartupType Disabled *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient" -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    }
+}
+
+# ==============================================================================
+# 18. БЛОКИРОВКА SMB OVER QUIC (ЗАЩИТА ОТ ОБХОДА ЧЕРЕЗ UDP 443 В WIN 11)
+# ==============================================================================
+$LanmanWorkstation = "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters"
+if (Test-Path $LanmanWorkstation) {
+    Apply-Tweak "Запрет передачи SMB-трафика через QUIC (UDP 443)" {
+        Set-ItemProperty -Path $LanmanWorkstation -Name "DisableSmbQuic" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    }
+}
+
+# ==============================================================================
+# 19. АКТИВАЦИЯ РЕЖИМА НЕВИДИМКИ (STEALTH MODE ДЛЯ ВСЕХ ПРОФИЛЕЙ)
+# ==============================================================================
+# Запрещает Windows отвечать пакетами TCP RST и ICMP Unreachable на закрытые порты
+$FirewallProfiles = @(
+    "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile",
+    "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile",
+    "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile"
+)
+foreach ($EastricaProfile in $FirewallProfiles) {
+    if (Test-Path $EastricaProfile) {
+        Apply-Tweak "Включение Stealth Mode (Скрытие ПК от сканеров портов)" {
+            Set-ItemProperty -Path $EastricaProfile -Name "DisableStealthMode" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        }
+    }
+}
+
+# ==============================================================================
+# 20. ЗАПРЕТ НЕБЕЗОПАСНОГО ГОСТЕВОГО ВХОДА SMB (ANTI-INSECURE GUEST FALLBACK)
+# ==============================================================================
+# Защищает от MitM-атак, когда поддельный сервер в сети принудительно сбрасывает авторизацию до гостя
+$LanmanPol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation"
+if (!(Test-Path $LanmanPol)) { New-Item -Path $LanmanPol -Force | Out-Null }
+Apply-Tweak "Запрет небезопасного гостевого входа SMB (Insecure Guest Auth)" {
+    Set-ItemProperty -Path $LanmanPol -Name "AllowInsecureGuestAuth" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
 }
 
 # Отключение ведения журнала Брандмауэром Windows для всех сетевых профилей
@@ -9200,7 +9456,8 @@ if ($global:IsLaptop -and -not $global:OptHwSleep) {
     # Устранение микро-задержек пробуждения ядер (C-state Exit Latency)
     Apply-Tweak "Снятие искусственного лимита состояний сна процессора" { Set-SafeCpuPower "9943e905-9a30-4ec1-9b99-44dd3b76f7a2" 0 0 }
     Apply-Tweak "Блокировка входа в состояние глубокого простоя (Idle Promote)" { Set-SafeCpuPower "7b224883-b3cc-4d79-819f-8374152cbe7c" 100 100 } # Запрещает ядрам проваливаться в глубокие энергосберегающие состояния С6\С7
-    Apply-Tweak "Минимальный порог вывода в рабочее состояние (Idle Demote)" { Set-SafeCpuPower "4b92d758-5a24-4851-a470-815d78aee119" 0 0 } # Любое минимальное прерывание от мыши или клавиатуры мгновенно выводит ядро в рабочее состояние C0
+    # 100 = вывод из глубокого сна при падении простоя ниже 100% (мгновенный переход в C0 при любой нагрузке)
+    Apply-Tweak "Минимальный порог вывода в рабочее состояние (Idle Demote)" { Set-SafeCpuPower "4b92d758-5a24-4851-a470-815d78aee119" 100 100 } # Любое минимальное прерывание от мыши или клавиатуры мгновенно выводит ядро в рабочее состояние C0
 
     # Мгновенный выход P-ядер (Class 1) на 100% частоты и удержание высокой частоты шины
     Apply-Tweak "Стартовая частота 100% для P-Cores при пробуждении (HETEROCLASS1INITIALPERF = 100)" { Set-SafeCpuPower "1facfc65-a930-4bc5-9f38-504ec097bbc0" 100 100 }
@@ -9336,7 +9593,7 @@ if ($global:OptBloatware) {
 
         $btnConfirm = New-Object System.Windows.Forms.Button
         $btnConfirm.Text = "УДАЛИТЬ ВЫБРАННОЕ"
-        $btnConfirm.Size = New-Object System.Drawing.Size([int](360 * $Scale), [int](40 * $Scale))
+        $btnConfirm.Size = New-Object System.Drawing.Size([int](175 * $Scale), [int](40 * $Scale))
         $btnConfirm.Location = New-Object System.Drawing.Point([int](10 * $Scale), [int](500 * $Scale))
         $btnConfirm.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
         $btnConfirm.ForeColor = [System.Drawing.Color]::White
@@ -9345,14 +9602,29 @@ if ($global:OptBloatware) {
         $btnConfirm.Add_Click({ $bloatForm.DialogResult = "OK"; $bloatForm.Close() })
         $bloatForm.Controls.Add($btnConfirm)
 
-        $bloatForm.ShowDialog() | Out-Null
+        $btnCancel = New-Object System.Windows.Forms.Button
+        $btnCancel.Text = "ОТМЕНА"
+        $btnCancel.Size = New-Object System.Drawing.Size([int](175 * $Scale), [int](40 * $Scale))
+        $btnCancel.Location = New-Object System.Drawing.Point([int](195 * $Scale), [int](500 * $Scale))
+        $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 50)
+        $btnCancel.ForeColor = [System.Drawing.Color]::White
+        $btnCancel.FlatStyle = "Flat"
+        $btnCancel.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Regular)
+        $btnCancel.Add_Click({ $bloatForm.DialogResult = "Cancel"; $bloatForm.Close() })
+        $bloatForm.Controls.Add($btnCancel)
+        $bloatForm.CancelButton = $btnCancel
+
+        $bloatResult = $bloatForm.ShowDialog()
         
         $AppsToRemove = @()
-        for ($i = 0; $i -lt $chkList.Items.Count; $i++) {
-            if ($chkList.GetItemChecked($i)) {
-                # Находим системное имя пакета по его человеческому описанию
-                $PackageName = $BloatDict.Keys | Where-Object { $BloatDict[$_] -eq $chkList.Items[$i] }
-                $AppsToRemove += $PackageName
+        # Удаляем выбранные пакеты только при явном подтверждении кнопкой, игнорируя закрытие крестиком или Отмену
+        if ($bloatResult -eq [System.Windows.Forms.DialogResult]::OK) {
+            for ($i = 0; $i -lt $chkList.Items.Count; $i++) {
+                if ($chkList.GetItemChecked($i)) {
+                    # Находим системное имя пакета по его человеческому описанию
+                    $PackageName = $BloatDict.Keys | Where-Object { $BloatDict[$_] -eq $chkList.Items[$i] }
+                    $AppsToRemove += $PackageName
+                }
             }
         }
         $bloatForm.Dispose()
@@ -9531,12 +9803,24 @@ foreach ($AiPolPath in @($WindowsAI_LM, $WindowsAI_CU)) {
     Apply-Tweak "Запрет активации компонента Recall ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "AllowRecallEnablement" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     # 0 = Запрет экспорта баз данных Recall
     Apply-Tweak "Запрет экспорта данных Recall ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "AllowRecallExport" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    # 2 = Принудительное отключение фоновых коннекторов ИИ-агентов в Windows 11 25H2/26H2 (ConfigureAgentConnectors = Force Disable)
-    Apply-Tweak "Отключение фоновых ИИ-агентов 26H2 ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "ConfigureAgentConnectors" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    $OsEditionId = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "EditionID" -ErrorAction SilentlyContinue).EditionID
+    $IsEnterpriseOrEdu = ($OsEditionId -match 'Enterprise|Education|IoTEnterprise')
+
+    if ($IsEnterpriseOrEdu) {
+        # 2 = Принудительное отключение фоновых коннекторов ИИ-агентов (поддерживается в Enterprise/Education/IoT)
+        Apply-Tweak "Отключение фоновых ИИ-агентов 26H2 ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "ConfigureAgentConnectors" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        # 1 = Политика удаления приложения Microsoft Copilot (Enterprise/Education/IoT)
+        Apply-Tweak "Политика авто-удаления приложения Copilot ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "RemoveMicrosoftCopilotApp" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        # DisableSettingsAgent = 1: отключение локальной ИИ-модели Settings MU (Enterprise/Education/IoT)
+        Apply-Tweak "Отключение ИИ-агента в Параметрах Windows 11 ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "DisableSettingsAgent" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    } else {
+        # На Windows 11 Home/Pro эти политики игнорируются системой (сам Copilot удаляется в Разделе 61 через Remove-AppxPackage)
+        Remove-ItemProperty -Path $AiPolPath -Name "ConfigureAgentConnectors" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        Remove-ItemProperty -Path $AiPolPath -Name "RemoveMicrosoftCopilotApp" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        Remove-ItemProperty -Path $AiPolPath -Name "DisableSettingsAgent" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    }
     # 1 = Отключение экранного анализатора контекста Click to Do
     Apply-Tweak "Отключение функции Click to Do ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "DisableClickToDo" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    # 1 = Официальная политика удаления приложения Microsoft Copilot в 25H2/26H2 (Remove Microsoft Copilot app)
-    Apply-Tweak "Политика авто-удаления приложения Copilot ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "RemoveMicrosoftCopilotApp" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     # 1 = Отключение генератора Cocreator
     Apply-Tweak "Отключение ИИ-генератора Cocreator ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "DisableCocreator" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     # 1 = Отключение семантического ИИ-индексатора поиска
@@ -9547,8 +9831,6 @@ foreach ($AiPolPath in @($WindowsAI_LM, $WindowsAI_CU)) {
     Apply-Tweak "Запрет анализа экрана ИИ ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "DisableScreenAnalysis" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     # 1 = Запрет оценки контента на экране
     Apply-Tweak "Запрет оценки контента ИИ ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "DisableContentEvaluation" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    # DisableSettingsAgent = 1: официальная политика отключения локальной ИИ-модели Settings MU в окне «Параметры» (Windows 11 24H2 KB5062660 / 25H2 / 26H2)
-    Apply-Tweak "Отключение ИИ-агента в Параметрах Windows 11 ($AiPolPath)" { Set-ItemProperty -Path $AiPolPath -Name "DisableSettingsAgent" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
 
 # Блокировка политик нового приложения Microsoft Copilot (Windows 11 25H2/26H2) и его действий в Edge
@@ -9713,149 +9995,9 @@ if (Test-Path $EdgePolicyPath) {
 }
 
 # ==============================================================================
-# Инъекция флагов запуска в ярлыки (Chromium & Electron - динамический аудиостек + Zero Idle)
+# Инъекция флагов запуска в ярлыки (Chromium & Electron - Zero Idle)
 # ==============================================================================
 Write-Host " ► Инъекция флагов запуска (Chromium & Electron Flags) в ярлыки..." -ForegroundColor DarkGray
-
-# Детектор физического числа аудио-каналов активного устройства через Windows CoreAudio (WASAPI)
-if (-not ("AudioEndpointHelper" -as [type])) {
-    $AudioDetectorCS = @"
-    using System;
-    using System.Runtime.InteropServices;
-    using Microsoft.Win32;
-
-    public class AudioEndpointHelper {
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-        private class MMDeviceEnumeratorComObject { }
-
-        [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IMMDeviceEnumerator {
-            [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
-            [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
-        }
-
-        [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IMMDevice {
-            [PreserveSig] int Activate(ref Guid id, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object interfacePointer);
-            [PreserveSig] int OpenPropertyStore(int stgmAccess, out IPropertyStore properties);
-            [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string strId);
-        }
-
-        [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IPropertyStore {
-            [PreserveSig] int GetCount(out int count);
-            [PreserveSig] int GetAt(int iProp, out PROPERTYKEY pkey);
-            [PreserveSig] int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
-            [PreserveSig] int SetValue(ref PROPERTYKEY key, ref PROPVARIANT propvar);
-            [PreserveSig] int Commit();
-        }
-
-        [ComImport, Guid("1CB9A8B9-7024-4E44-AC44-2525E7E212A1"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IAudioClient {
-            [PreserveSig] int Initialize(int shareMode, int streamFlags, long bufferDuration, long periodicity, IntPtr format, ref Guid audioSessionGuid);
-            [PreserveSig] int GetBufferSize(out uint bufferSize);
-            [PreserveSig] int GetStreamLatency(out long latency);
-            [PreserveSig] int GetCurrentPadding(out uint currentPadding);
-            [PreserveSig] int IsFormatSupported(int shareMode, IntPtr format, out IntPtr closestMatch);
-            [PreserveSig] int GetMixFormat(out IntPtr deviceFormat);
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct PROPERTYKEY { public Guid fmtid; public int pid; }
-
-        // Явно задаем Size = 24 байта (требование выравнивания нативной C++ структуры PROPVARIANT в 64-битной Windows для предотвращения повреждения стека при вызове IPropertyStore::GetValue)
-        [StructLayout(LayoutKind.Explicit, Size = 24)]
-        private struct PROPVARIANT {
-            [FieldOffset(0)] public ushort vt;      // Тип варианта (VT_LPWSTR = 31, VT_UI4 = 19)
-            [FieldOffset(8)] public uint ulVal;     // 32-битное беззнаковое значение (маска аудиоканалов)
-            [FieldOffset(8)] public IntPtr ptrVal;  // 64-битный указатель на строку в памяти (имя аудиоустройства)
-        }
-
-        public static int GetDefaultOutputChannels() {
-            try {
-                IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
-                IMMDevice dev = null;
-                
-                int hr = enumerator.GetDefaultAudioEndpoint(0, 0, out dev);
-                if (hr != 0 || dev == null) return 2;
-
-                // 1. ПРОВЕРКА РЕЕСТРА: Флаги Home Theater Effects (Dolby Atmos для ресиверов)
-                string devId;
-                dev.GetId(out devId);
-                if (!string.IsNullOrEmpty(devId)) {
-                    int braceIdx = devId.IndexOf('{', 1);
-                    if (braceIdx >= 0) {
-                        string guid = devId.Substring(braceIdx);
-                        using (var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\" + guid + @"\FxProperties")) {
-                            if (key != null) {
-                                object val = key.GetValue("{b725f130-47ef-101a-a5f1-02608c9eebac},10");
-                                if (val != null && val.ToString().IndexOf("Home Theater", StringComparison.OrdinalIgnoreCase) >= 0) {
-                                    return 8; // 7.1 Dolby Atmos Home Theater
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 2. ПРОВЕРКА ИМЕНИ И АППАРАТНОЙ МАСКИ
-                IPropertyStore store;
-                hr = dev.OpenPropertyStore(0, out store);
-                if (hr == 0 && store != null) {
-                    // А. Проверка имени (Denon, Marantz, Yamaha, Onkyo, Pioneer, AVR)
-                    PROPERTYKEY pkeyName = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 14 };
-                    PROPVARIANT pvName = new PROPVARIANT();
-                    store.GetValue(ref pkeyName, out pvName);
-                    if (pvName.vt == 31 && pvName.ptrVal != IntPtr.Zero) {
-                        string name = Marshal.PtrToStringUni(pvName.ptrVal);
-                        if (!string.IsNullOrEmpty(name)) {
-                            string n = name.ToUpperInvariant();
-                            if (n.Contains("AVR") || n.Contains("RECEIVER") || n.Contains("DENON") || 
-                                n.Contains("MARANTZ") || n.Contains("ONKYO") || n.Contains("YAMAHA") || 
-                                n.Contains("PIONEER") || n.Contains("ATMOS") || n.Contains("THEATER")) {
-                                return 8; // 7.1 Ресивер
-                            }
-                        }
-                    }
-
-                    // Б. Проверка для классических аналоговых 5.1/7.1 систем
-                    PROPERTYKEY pkeySpeakers = new PROPERTYKEY { fmtid = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 3 };
-                    PROPVARIANT pvSpeakers = new PROPVARIANT();
-                    store.GetValue(ref pkeySpeakers, out pvSpeakers);
-                    if (pvSpeakers.vt == 19 && pvSpeakers.ulVal > 0) {
-                        uint mask = pvSpeakers.ulVal;
-                        int channels = 0;
-                        while (mask > 0) {
-                            channels += (int)(mask & 1);
-                            mask >>= 1;
-                        }
-                        if (channels > 0) return channels;
-                    }
-                }
-
-                // 3. РЕЗЕРВНЫЙ МЕТОД: Для обычных стерео-наушников
-                Guid IID_IAudioClient = new Guid("1CB9A8B9-7024-4E44-AC44-2525E7E212A1");
-                object obj;
-                hr = dev.Activate(ref IID_IAudioClient, 23, IntPtr.Zero, out obj);
-                if (hr == 0 && obj != null) {
-                    IAudioClient client = (IAudioClient)obj;
-                    IntPtr pFormat = IntPtr.Zero;
-                    hr = client.GetMixFormat(out pFormat);
-                    if (hr == 0 && pFormat != IntPtr.Zero) {
-                        short channels = Marshal.ReadInt16(pFormat, 2);
-                        Marshal.FreeCoTaskMem(pFormat);
-                        if (channels > 0) return (int)channels;
-                    }
-                }
-            } catch { }
-            return 2;
-        }
-    }
-"@
-    Add-Type -TypeDefinition $AudioDetectorCS -ErrorAction SilentlyContinue
-}
-
-$script:DetectedAudioChannels = [AudioEndpointHelper]::GetDefaultOutputChannels()
-Write-Host " ► Обнаружено каналов аудио на активном устройстве: $script:DetectedAudioChannels" -ForegroundColor Cyan
 
 $WshShell = New-Object -ComObject WScript.Shell
 
@@ -9887,15 +10029,12 @@ if ($IsRTX) {
     $BrowserSpecificFeatures += @("RTXVideoHDR", "RTXVideoSuperResolution", "NvidiaVpSuperResolution", "NvidiaVpTrueHDR")
 }
 
-# Не навязываем каналы и отключение ресемплера, чтобы не ломать Dolby Access Upmixer и переключение AVR
-$BrowserAudioParams = ""
-
 # Формируем единый список фичей для браузеров (Параллельная загрузка + Усыпление неактивных вкладок)
 $BrowserFeatures = $IdleThrottleFeatures + $BrowserSpecificFeatures
 $BrowserCombinedFeatures = " --enable-features=" + ($BrowserFeatures -join ",")
 
 # Собираем чистую строку аргументов для веб-браузеров (Chrome, Edge, Brave, Opera)
-$BrowserFlags = "$BaseFlags$BrowserAudioParams$BrowserCombinedFeatures"
+$BrowserFlags = "$BaseFlags$BrowserCombinedFeatures"
 
 # Собираем строку аргументов для Electron-приложений (Discord, Spotify, лаунчеры) без жесткого лимита процессов
 $ElectronCombinedFeatures = " --enable-features=" + ($IdleThrottleFeatures -join ",")
@@ -10141,9 +10280,27 @@ if ($InstallEdgeRedirect) {
             $EdgeRedirectUrl = "https://github.com/rcmaehl/MSEdgeRedirect/releases/latest/download/MSEdgeRedirect.exe"
             Download-File-Safe -Url $EdgeRedirectUrl -Output $EdgeRedirectExe
             if (Test-Path $EdgeRedirectExe) {
-                $merDirect = Start-Process -FilePath $EdgeRedirectExe -ArgumentList "/install /silent" -WindowStyle Hidden -PassThru
-                if ($merDirect) {
-                    if (-not $merDirect.WaitForExit(60000)) { try { $merDirect.Kill() } catch {} }
+                # По официальной документации MSEdgeRedirect тихое развертывание выполняется флагом /silentinstall и файлом Setup.ini
+                $EdgeRedirectIni = "$BaseDir\MSEdgeRedirect_Setup.ini"
+                $MerIniContent = @"
+[Config]
+Mode=Active
+
+[Settings]
+Edges=Stable,Beta,Dev,Canary
+NoApps=True
+NoBing=True
+NoMSN=True
+NoTray=True
+"@
+                Set-Content -Path $EdgeRedirectIni -Value $MerIniContent -Encoding ASCII -Force
+                try {
+                    $merDirect = Start-Process -FilePath $EdgeRedirectExe -ArgumentList @("/silentinstall", $EdgeRedirectIni) -WindowStyle Hidden -PassThru
+                    if ($merDirect) {
+                        if (-not $merDirect.WaitForExit(60000)) { try { $merDirect.Kill() } catch {} }
+                    }
+                } finally {
+                    Remove-Item -LiteralPath $EdgeRedirectIni -Force -ErrorAction SilentlyContinue
                 }
             }
         }
@@ -10301,11 +10458,21 @@ if ($global:OptServices) {
 }
 
 # [Windows 11 26H2] Приоритет легкого встроенного драйвера Windows Ready Print (IPP) вместо тяжелых сторонних OEM-драйверов
-$PrinterRanking = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\DriverRanking"
-if (!(Test-Path $PrinterRanking)) { Apply-Tweak "Создание раздела Printer DriverRanking (26H2)" { New-Item -Path $PrinterRanking -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-# UseWindowsReadyPrintDriverRankingGroupPolicy = 1 заставляет ОС предпочитать встроенный IPP-драйвер
-Apply-Tweak "Включение приоритета легких IPP-драйверов Windows Ready Print (26H2)" { 
-    Set-ItemProperty -Path $PrinterRanking -Name "UseWindowsReadyPrintDriverRankingGroupPolicy" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 
+$PrintersPolicyRoot = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers"
+$PrinterRanking = "$PrintersPolicyRoot\DriverRanking"
+$printersRootExisted = Test-Path -LiteralPath $PrintersPolicyRoot
+$driverRankingExisted = Test-Path -LiteralPath $PrinterRanking
+if ($printersRootExisted) { Grant-RegPermission -RegPath $PrintersPolicyRoot }
+if ($driverRankingExisted) { Grant-RegPermission -RegPath $PrinterRanking }
+try {
+    if (!(Test-Path -LiteralPath $PrinterRanking)) { Apply-Tweak "Создание раздела Printer DriverRanking (26H2)" { New-Item -Path $PrinterRanking -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
+    # UseWindowsReadyPrintDriverRankingGroupPolicy = 1 заставляет ОС предпочитать встроенный IPP-драйвер
+    Apply-Tweak "Включение приоритета легких IPP-драйверов Windows Ready Print (26H2)" { 
+        Set-ItemProperty -Path $PrinterRanking -Name "UseWindowsReadyPrintDriverRankingGroupPolicy" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 
+    }
+} finally {
+    if ($driverRankingExisted) { Restore-RegPermission -RegPath $PrinterRanking }
+    if ($printersRootExisted) { Restore-RegPermission -RegPath $PrintersPolicyRoot }
 }
 
 # Уничтожение Neural Compute Agents (Освобождение RAM от встроенного ИИ безопасности — возвращена прямая запись в реестр из Old)
@@ -10313,9 +10480,15 @@ $AIServices = @("NcaSvc", "Amentm*", "webthreatdefusersvc*", "webthreatdefsvc")
 foreach ($SvcPattern in $AIServices) {
     Get-Service -Name $SvcPattern -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | ForEach-Object {
         $Svc = $_.Name
+        $SvcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Svc"
         Apply-Tweak "Остановка встроенного ИИ безопасности ($Svc)" { Stop-Service -Name $Svc -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Убиваем службы
         Apply-Tweak "Отключение автозапуска службы ИИ безопасности ($Svc)" { Set-Service -Name $Svc -StartupType Disabled *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Отключаем их
-        Apply-Tweak "Отключение службы ИИ безопасности в реестре ($Svc)" { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Svc" -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Добиваем через реестр (4 = Disabled)
+        Grant-RegPermission -RegPath $SvcRegPath
+        try {
+            Apply-Tweak "Отключение службы ИИ безопасности в реестре ($Svc)" { Set-ItemProperty -Path $SvcRegPath -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Добиваем через реестр (4 = Disabled)
+        } finally {
+            Restore-RegPermission -RegPath $SvcRegPath
+        }
     }
 }
 
@@ -10330,10 +10503,15 @@ Apply-Tweak "Глобальное разрешение фоновых UWP при
 # Уничтожение CDPUserSvc (служба платформы подключенных устройств)
 # Главный виновник микро-статтеров раз в 5-10 минут. Она пингует сеть в поисках ваших смартфонов по Bluetooth/Wi-Fi.
 Apply-Tweak "Отключение службы CDPSvc в реестре" { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\CDPSvc" -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 4 = Disabled
-Apply-Tweak "Отключение службы CDPUserSvc в реестре" { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\CDPUserSvc" -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 4 = Disabled
-# Убиваем динамические пользовательские дубликаты (CDPUserSvc_xxxx)
+# Отключаем шаблон и все пользовательские экземпляры (CDPUserSvc_xxxx) с захватом прав
 Get-ChildItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | Where-Object { $_.PSChildName -match "^CDPUserSvc" } | ForEach-Object {
-    Apply-Tweak "Отключение динамического дубликата CDPUserSvc ($($_.PSChildName))" { Set-ItemProperty -Path $_.PSPath -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 4 = Disabled для дубликатов
+    $cdpPath = $_.PSPath
+    Grant-RegPermission -RegPath $cdpPath
+    try {
+        Apply-Tweak "Отключение службы/дубликата CDPUserSvc ($($_.PSChildName))" { Set-ItemProperty -LiteralPath $cdpPath -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 4 = Disabled
+    } finally {
+        Restore-RegPermission -RegPath $cdpPath
+    }
 }
 
 # Отключение фонового опроса TPM (Защита от fTPM Stutters - аппаратных лагов при работе модуля шифрования)
@@ -10362,7 +10540,13 @@ Apply-Tweak "Отключение Absolute Volume для Bluetooth аудио" {
 
 # Восстановление службы WpnUserService (Критично для работы панели Календаря и уведомлений)
 Get-ChildItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | Where-Object { $_.PSChildName -match "^WpnUserService" } | ForEach-Object {
-    Apply-Tweak "Включение службы WpnUserService ($($_.PSChildName))" { Set-ItemProperty -Path $_.PSPath -Name "Start" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 2 = Auto
+    $wpnPath = $_.PSPath
+    Grant-RegPermission -RegPath $wpnPath
+    try {
+        Apply-Tweak "Включение службы WpnUserService ($($_.PSChildName))" { Set-ItemProperty -LiteralPath $wpnPath -Name "Start" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 2 = Auto
+    } finally {
+        Restore-RegPermission -RegPath $wpnPath
+    }
 }
 Apply-Tweak "Включение службы WpnService" { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WpnService" -Name "Start" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 2 = Auto
 Apply-Tweak "Запуск службы WpnService" { Start-Service -Name "WpnService" -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Запускаем
@@ -10454,8 +10638,17 @@ Apply-Tweak "Блокировка платформы Виджетов (Глоб�
 
 # Отключение "Галереи" (Gallery) в Win 11
 # Она фоново сканирует и индексирует картинки на дисках, дико нагружая процессор
-$Gallery = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace_41040327\{e88865ea-0e1c-4e20-9aa6-edcd0212c87c}"
-if (Test-Path $Gallery) { Apply-Tweak "Удаление узла 'Галерея' из навигационной панели" { Remove-Item -LiteralPath $Gallery -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } } # Удаляем узел из навигационной панели
+$GalleryParent = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace_41040327"
+$Gallery = "$GalleryParent\{e88865ea-0e1c-4e20-9aa6-edcd0212c87c}"
+if (Test-Path $Gallery) {
+    # В Windows 11 раздел NameSpace_41040327 принадлежит TrustedInstaller — без захвата прав Remove-Item выдаёт [FAIL]
+    Grant-RegPermission -RegPath $GalleryParent
+    try {
+        Apply-Tweak "Удаление узла 'Галерея' из навигационной панели" { Remove-Item -LiteralPath $Gallery -Recurse -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    } finally {
+        Restore-RegPermission -RegPath $GalleryParent
+    }
+}
 
 # Глобальное отключение советов, подсказок, приветствий и скрытой рекламы в Windows 11/10
 $ContentDel = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
@@ -10611,9 +10804,17 @@ if ($global:OptUAC) {
     }
 }
 
+# Предварительно сохраняем текущие параметры MitigationOptions в бэкап, так как Set-ProcessMitigation пишет в реестр в обход прокси Set-ItemProperty
+$IfeoRootMit = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+foreach ($mitApp in @("dwm.exe", "explorer.exe")) {
+    Save-RegistryValueForRollback -Path "$IfeoRootMit\$mitApp" -Name "MitigationOptions"
+    Save-RegistryValueForRollback -Path "$IfeoRootMit\$mitApp" -Name "MitigationAuditOptions"
+}
+
 if (-not $global:OptAntiCheat) {
-    Apply-Tweak "Отключение Exploit Protection для DWM (dwm.exe)" { Set-ProcessMitigation -Name dwm.exe -Disable CFG, EmulateAtlThunks, BottomUp, HighEntropy, SEHOP, StrictHandle *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    Apply-Tweak "Отключение Exploit Protection для Проводника (explorer.exe)" { Set-ProcessMitigation -Name explorer.exe -Disable CFG, EmulateAtlThunks, BottomUp, HighEntropy, SEHOP, StrictHandle *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    # Сохраняем ASLR (BottomUp, HighEntropy) для DWM и ASLR + CFG для Explorer (он загружает сторонние расширения оболочки)
+    Apply-Tweak "Оптимизация Exploit Protection для DWM (dwm.exe)" { Set-ProcessMitigation -Name dwm.exe -Disable CFG, EmulateAtlThunks, SEHOP, StrictHandle *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Оптимизация Exploit Protection для Проводника (explorer.exe)" { Set-ProcessMitigation -Name explorer.exe -Disable EmulateAtlThunks, SEHOP, StrictHandle *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 } else {
     Apply-Tweak "Включение Exploit Protection для DWM (dwm.exe)" { Set-ProcessMitigation -Name dwm.exe -Enable DEP, CFG *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     Apply-Tweak "Включение Exploit Protection для Проводника (explorer.exe)" { Set-ProcessMitigation -Name explorer.exe -Enable DEP, CFG *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
@@ -10830,7 +11031,7 @@ $lbl.AutoSize = $false # Фиксированный размер
 $lbl.Size = New-Object System.Drawing.Size([int](450 * $Scale), [int](20 * $Scale)) # Ширина метки
 $lbl.Location = New-Object System.Drawing.Point([int](10 * $Scale), [int](15 * $Scale)) # Отступы
 $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10) # Шрифт
-$lbl.Text = "Подготовка к очистке..." # Стартовый текст
+$lbl.Text = (L "Подготовка к очистке..." "Preparing for cleanup...") # Стартовый текст
 $form.Controls.Add($lbl) # Добавляем текст в окно
 
 $pb = New-Object System.Windows.Forms.ProgressBar # Создаем полосу загрузки (Прогресс-бар)
@@ -10889,11 +11090,15 @@ $ps.Runspace = $Runspace
         $syncHash.CurrentPct = $pct
         $syncHash.CurrentMsg = $Message
         
-        # Делегируем обновление графики в главный UI-поток
-        $syncHash.Form.Invoke([action]{
-            $syncHash.Label.Text = "[$($syncHash.CurrentPct)%] $($syncHash.CurrentMsg)"
-            $syncHash.ProgressBar.Value = $syncHash.CurrentPct
-        })
+        # Ожидаем создания дескриптора окна в главном потоке после вызова ShowDialog(), чтобы исключить гонку при Invoke
+        while (-not $syncHash.Form.IsHandleCreated -and -not $syncHash.CloseRequested) { Start-Sleep -Milliseconds 20 }
+        if ($syncHash.Form.IsHandleCreated -and -not $syncHash.Form.IsDisposed) {
+            # Делегируем обновление графики в главный UI-поток
+            $syncHash.Form.Invoke([action]{
+                $syncHash.Label.Text = "[$($syncHash.CurrentPct)%] $($syncHash.CurrentMsg)"
+                $syncHash.ProgressBar.Value = $syncHash.CurrentPct
+            })
+        }
     }
 
     Next-Step (L "Остановка блокирующих служб..." "Stopping blocking services...")
@@ -11381,8 +11586,10 @@ if (-not ("FastMem" -as [type])) {
 }
 [FastMem]::Flush()
 [System.GC]::Collect()
+$global:IsRU = ((Get-UICulture).TwoLetterISOLanguageName -eq "ru")
+function L ([string]$Ru, [string]$En) { if ($global:IsRU) { return $Ru } else { return $En } }
 $wshell = New-Object -ComObject Wscript.Shell
-$wshell.Popup("Оперативная память, VRAM и кэш Standby успешно очищены.", 5, "Eastrica RAM & VRAM Flush", 64) | Out-Null
+$wshell.Popup((L "Оперативная память, VRAM и кэш Standby успешно очищены." "RAM, VRAM, and Standby cache cleared successfully."), 5, "Eastrica RAM & VRAM Flush", 64) | Out-Null
 '@
 Apply-Tweak "Создание утилиты мгновенного сброса RAM и VRAM" { 
     # Удаляем старый кэш FastMem.dll, чтобы при следующем запуске утилита гарантированно скомпилировала свежий C#-код
@@ -11408,7 +11615,9 @@ if (!(Test-Path "$MenuKey_Exp\command")) { Apply-Tweak "Создание раз�
 Apply-Tweak "Установка названия для кнопки RestartExplorer" { Set-ItemProperty -Path $MenuKey_Exp -Name "MUIVerb" -Value (L "Перезапустить Explorer" "Restart Explorer") -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Установка иконки для кнопки RestartExplorer" { Set-ItemProperty -Path $MenuKey_Exp -Name "Icon" -Value "explorer.exe,0" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 # Команда завершает процесс explorer.exe, ждет авто-перезапуска от Winlogon и запускает его вручную только при необходимости
-$RestartExpCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Get-Process -ErrorAction SilentlyContinue | Where-Object { -not $_.Responding } | Stop-Process -Force -ErrorAction SilentlyContinue; Stop-Process -Name ''ShellExperienceHost'', ''TextInputHost'', ''StartMenuExperienceHost'' -Force -ErrorAction SilentlyContinue; Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }; (New-Object -ComObject Wscript.Shell).Popup(''Проводник (Explorer) успешно перезапущен'', 3, ''Система'', 64) | Out-Null"'
+$RestartExpMsg = L 'Проводник (Explorer) успешно перезапущен' 'Windows Explorer restarted successfully'
+$RestartExpTitle = L 'Система' 'System'
+$RestartExpCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Get-Process -ErrorAction SilentlyContinue | Where-Object { -not $_.Responding } | Stop-Process -Force -ErrorAction SilentlyContinue; Stop-Process -Name ''ShellExperienceHost'', ''TextInputHost'', ''StartMenuExperienceHost'' -Force -ErrorAction SilentlyContinue; Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }; (New-Object -ComObject Wscript.Shell).Popup(''' + $RestartExpMsg + ''', 3, ''' + $RestartExpTitle + ''', 64) | Out-Null"'
 Apply-Tweak "Привязка команды чистого перезапуска Проводника к кнопке" { Set-Item -Path "$MenuKey_Exp\command" -Value $RestartExpCommand -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 # ---------------------------------------------------------
@@ -11525,7 +11734,7 @@ public class DisplayHzFix {
         
         if (highestHz > current.dmDisplayFrequency) {
             bestMode.dmFields = 0x00580000; // DM_PELSWIDTH (0x80000) | DM_PELSHEIGHT (0x100000) | DM_DISPLAYFREQUENCY (0x400000)
-            ChangeDisplaySettings(ref bestMode, 0);
+            ChangeDisplaySettings(ref bestMode, 1); // 1 = CDS_UPDATEREGISTRY (сохраняет герцовку в профиль дисплея после перезагрузки)
             return highestHz;
         }
         return current.dmDisplayFrequency;
@@ -11533,9 +11742,11 @@ public class DisplayHzFix {
 }
 "@
 Add-Type -TypeDefinition $hzCode
+$global:IsRU = ((Get-UICulture).TwoLetterISOLanguageName -eq "ru")
+function L ([string]$Ru, [string]$En) { if ($global:IsRU) { return $Ru } else { return $En } }
 $applied = [DisplayHzFix]::ApplyHighestHz()
 $wshell = New-Object -ComObject Wscript.Shell
-$wshell.Popup("Герцовка дисплея установлена на максимум: $applied Hz", 5, "Eastrica Display Sync", 262208) | Out-Null
+$wshell.Popup((L "Герцовка дисплея установлена на максимум: $applied Hz" "Display refresh rate set to maximum: $applied Hz"), 5, "Eastrica Display Sync", 262208) | Out-Null
 '@
     Apply-Tweak "Создание утилиты восстановления герцовки" { Set-Content -Path $HzScriptPath -Value $HzScriptCode -Encoding UTF8 -Force }
 
@@ -11559,7 +11770,6 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $global:IsRU = ((Get-UICulture).TwoLetterISOLanguageName -eq "ru")
-function L ([string]$Ru, [string]$En) { if ($global:IsRU) { return $Ru } else { return $En } }
 
 $MouseTesterCS = @"
 using System;
@@ -11567,6 +11777,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 
 public class MouseTesterApp : Form {
@@ -11592,36 +11803,70 @@ public class MouseTesterApp : Form {
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern uint GetRawInputData(IntPtr hRawInput, uint uiCommand, IntPtr pData, ref uint pcbSize, uint cbSizeHeader);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
     [DllImport("dwmapi.dll")]
     internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
     private const int WM_INPUT = 0x00FF;
+    private const uint WM_STOP_SINK = 0x8001;
     private const uint RID_INPUT = 0x10000003;
     private const uint RIDEV_INPUTSINK = 0x00000100;
+    private const uint RIDEV_REMOVE = 0x00000001;
 
-    private IntPtr rawBuffer = IntPtr.Zero;
+    private class RawSinkWindow : NativeWindow {
+        private MouseTesterApp owner;
+        public RawSinkWindow(MouseTesterApp owner) {
+            this.owner = owner;
+            CreateParams cp = new CreateParams();
+            cp.Parent = new IntPtr(-3); // HWND_MESSAGE: прием WM_INPUT в отдельном потоке без UI-перерисовки
+            this.CreateHandle(cp);
+        }
+
+        protected override void WndProc(ref Message m) {
+            if (m.Msg == WM_INPUT) {
+                owner.HandleRawInput(m.LParam);
+                base.WndProc(ref m);
+                return;
+            }
+            if (m.Msg == (int)WM_STOP_SINK) {
+                Application.ExitThread();
+                return;
+            }
+            base.WndProc(ref m);
+        }
+    }
+
+    private readonly object syncLock = new object();
+    private readonly Queue<double> msHistory = new Queue<double>();
+    private const int WINDOW_SIZE = 300;
+
+    private Thread sinkThread;
+    private IntPtr sinkHandle = IntPtr.Zero;
+    private ManualResetEvent sinkReady = new ManualResetEvent(false);
+    private IntPtr sinkRawBuffer = IntPtr.Zero;
     private int headerSize = 0;
+
     private long lastTicks = 0;
+    private volatile bool isActive = true;
+    private volatile bool resetPending = false;
 
-    private double currentHz = 0;
     private double peakHz = 0;
-    private double avgHz = 0;
-    private double jitterHz = 0;
     private long totalSamples = 0;
-
-    private Queue<double> hzHistory = new Queue<double>();
-    private const int WINDOW_SIZE = 120;
 
     private Label lblCurrentVal;
     private Label lblPeakVal;
     private Label lblAvgVal;
-    private Label lblJitterVal;
+    private Label lblJitterMsVal;
+    private Label lblJitterHzVal;
     private Label lblSampleCount;
     private Panel canvas;
     private System.Windows.Forms.Timer updateTimer;
 
     public MouseTesterApp(bool isRu) {
-        this.Text = isRu ? "Eastrica - Тестер частоты опроса мыши (Raw Input)" : "Eastrica - Mouse Polling Rate Tester (Raw Input)";
+        this.DoubleBuffered = true;
+        this.Text = isRu ? "Eastrica - Точный тестер мыши (Dedicated Thread)" : "Eastrica - Precision Mouse Tester (Dedicated Thread)";
         this.ClientSize = new Size(540, 420);
         this.StartPosition = FormStartPosition.CenterScreen;
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -11630,26 +11875,27 @@ public class MouseTesterApp : Form {
         this.ForeColor = Color.White;
         this.TopMost = true;
 
-        // Включение темного заголовка DWM
         int darkMode = 1;
         DwmSetWindowAttribute(this.Handle, 20, ref darkMode, 4);
         DwmSetWindowAttribute(this.Handle, 19, ref darkMode, 4);
 
         headerSize = Marshal.SizeOf(typeof(RAWINPUTHEADER));
-        rawBuffer = Marshal.AllocHGlobal(128);
+
+        this.Activated += (s, e) => { isActive = true; };
+        this.Deactivate += (s, e) => { isActive = false; };
 
         InitializeInterface(isRu);
-        InitRawInput();
+        StartSinkThread();
 
         updateTimer = new System.Windows.Forms.Timer();
-        updateTimer.Interval = 16; // 60 FPS обновление интерфейса
+        updateTimer.Interval = 33;
         updateTimer.Tick += (s, e) => UpdateMetricsUI(isRu);
         updateTimer.Start();
     }
 
     private void InitializeInterface(bool isRu) {
         Label lblHeader = new Label {
-            Text = isRu ? "Непрерывно двигайте мышью для фиксации частоты" : "Move mouse continuously inside window to measure rate",
+            Text = isRu ? "Быстро и непрерывно двигайте мышью (отдельный поток Raw Input)" : "Move mouse continuously (dedicated Raw Input thread)",
             Font = new Font("Segoe UI", 10, FontStyle.Bold),
             ForeColor = Color.FromArgb(0, 200, 255),
             Location = new Point(15, 12),
@@ -11657,23 +11903,28 @@ public class MouseTesterApp : Form {
         };
         this.Controls.Add(lblHeader);
 
-        // Карточка 1: Текущая частота
         Panel pnlCur = CreateMetricCard(15, 45, 120, 75, isRu ? "ТЕКУЩАЯ" : "CURRENT", Color.FromArgb(0, 200, 255));
         lblCurrentVal = (Label)pnlCur.Controls[1];
 
-        // Карточка 2: Пиковая частота
         Panel pnlPeak = CreateMetricCard(145, 45, 120, 75, isRu ? "ПИКОВАЯ" : "PEAK", Color.FromArgb(50, 255, 100));
         lblPeakVal = (Label)pnlPeak.Controls[1];
 
-        // Карточка 3: Средняя частота
         Panel pnlAvg = CreateMetricCard(275, 45, 120, 75, isRu ? "СРЕДНЯЯ" : "AVERAGE", Color.FromArgb(255, 200, 50));
         lblAvgVal = (Label)pnlAvg.Controls[1];
 
-        // Карточка 4: Джиттер / Стабильность
         Panel pnlJit = CreateMetricCard(405, 45, 120, 75, isRu ? "ДЖИТТЕР" : "JITTER", Color.FromArgb(255, 80, 80));
-        lblJitterVal = (Label)pnlJit.Controls[1];
+        lblJitterMsVal = (Label)pnlJit.Controls[1];
+        lblJitterMsVal.Font = new Font("Segoe UI", 12, FontStyle.Bold);
+        lblJitterMsVal.Text = "± 0.00 ms";
+        lblJitterHzVal = new Label {
+            Text = "(± 0 Hz)",
+            Font = new Font("Segoe UI", 9, FontStyle.Regular),
+            ForeColor = Color.FromArgb(220, 140, 140),
+            Location = new Point(5, 52),
+            AutoSize = true
+        };
+        pnlJit.Controls.Add(lblJitterHzVal);
 
-        // Интерактивная зона движения мыши
         canvas = new Panel {
             Location = new Point(15, 130),
             Size = new Size(510, 210),
@@ -11743,7 +11994,7 @@ public class MouseTesterApp : Form {
             Text = "0 Hz",
             Font = new Font("Segoe UI", 14, FontStyle.Bold),
             ForeColor = valueColor,
-            Location = new Point(5, 28),
+            Location = new Point(5, 26),
             AutoSize = true
         };
         pnl.Controls.Add(lblTitle);
@@ -11752,99 +12003,145 @@ public class MouseTesterApp : Form {
         return pnl;
     }
 
-    private void InitRawInput() {
-        RAWINPUTDEVICE[] rid = new RAWINPUTDEVICE[1];
-        rid[0].usUsagePage = 0x01; // Generic Desktop Controls
-        rid[0].usUsage = 0x02;     // Mouse
-        rid[0].dwFlags = RIDEV_INPUTSINK;
-        rid[0].hwndTarget = this.Handle;
-        RegisterRawInputDevices(rid, 1, (uint)Marshal.SizeOf(typeof(RAWINPUTDEVICE)));
+    private void StartSinkThread() {
+        sinkThread = new Thread(new ThreadStart(SinkLoop));
+        sinkThread.IsBackground = true;
+        sinkThread.Priority = ThreadPriority.Highest;
+        sinkThread.SetApartmentState(ApartmentState.STA);
+        sinkThread.Start();
+        sinkReady.WaitOne(2000);
+    }
+
+    private void SinkLoop() {
+        RawSinkWindow sink = null;
+        sinkRawBuffer = Marshal.AllocHGlobal(128);
+        try {
+            sink = new RawSinkWindow(this);
+            sinkHandle = sink.Handle;
+
+            RAWINPUTDEVICE[] rid = new RAWINPUTDEVICE[1];
+            rid[0].usUsagePage = 0x01;
+            rid[0].usUsage = 0x02;
+            rid[0].dwFlags = RIDEV_INPUTSINK;
+            rid[0].hwndTarget = sinkHandle;
+            RegisterRawInputDevices(rid, 1, (uint)Marshal.SizeOf(typeof(RAWINPUTDEVICE)));
+
+            sinkReady.Set();
+            Application.Run();
+
+            rid[0].dwFlags = RIDEV_REMOVE;
+            rid[0].hwndTarget = IntPtr.Zero;
+            RegisterRawInputDevices(rid, 1, (uint)Marshal.SizeOf(typeof(RAWINPUTDEVICE)));
+        } catch {
+            sinkReady.Set();
+        } finally {
+            sinkHandle = IntPtr.Zero;
+            if (sink != null) { try { sink.DestroyHandle(); } catch {} }
+            if (sinkRawBuffer != IntPtr.Zero) { Marshal.FreeHGlobal(sinkRawBuffer); sinkRawBuffer = IntPtr.Zero; }
+        }
+    }
+
+    internal void HandleRawInput(IntPtr lParam) {
+        long now = Stopwatch.GetTimestamp();
+        uint size = 128;
+        uint bytesCopied = GetRawInputData(lParam, RID_INPUT, sinkRawBuffer, ref size, (uint)headerSize);
+        if (bytesCopied >= (uint)(headerSize + 20) && bytesCopied <= 128) {
+            int dwType = Marshal.ReadInt32(sinkRawBuffer, 0);
+            if (dwType != 0) return;
+
+            int lastX = Marshal.ReadInt32(sinkRawBuffer, headerSize + 12);
+            int lastY = Marshal.ReadInt32(sinkRawBuffer, headerSize + 16);
+            if (lastX == 0 && lastY == 0) return;
+
+            if (!isActive) { lastTicks = 0; return; }
+            if (resetPending) { lastTicks = 0; resetPending = false; }
+
+            if (lastTicks != 0) {
+                double deltaSec = (double)(now - lastTicks) / Stopwatch.Frequency;
+
+                // Пауза/разворот руки (>= 15 мс, < 67 Hz) начинает новый отрезок без порчи джиттера
+                if (deltaSec >= 0.015) {
+                    lastTicks = now;
+                    return;
+                }
+
+                // Отсечка дублей очереди (< 0.08 мс), сохраняя поддержку до 8000 Hz
+                if (deltaSec < 0.00008) {
+                    return;
+                }
+
+                double deltaMs = deltaSec * 1000.0;
+                double instHz = 1000.0 / deltaMs;
+
+                lock (syncLock) {
+                    if (instHz > peakHz) peakHz = instHz;
+                    msHistory.Enqueue(deltaMs);
+                    if (msHistory.Count > WINDOW_SIZE) msHistory.Dequeue();
+                    totalSamples++;
+                }
+            }
+            lastTicks = now;
+        }
     }
 
     private void ResetMetrics() {
-        lock (hzHistory) {
-            hzHistory.Clear();
-            currentHz = 0;
+        resetPending = true;
+        lock (syncLock) {
+            msHistory.Clear();
             peakHz = 0;
-            avgHz = 0;
-            jitterHz = 0;
             totalSamples = 0;
-            lastTicks = 0;
         }
-    }
-
-    protected override void WndProc(ref Message m) {
-        if (m.Msg == WM_INPUT) {
-            uint size = 128;
-            uint bytesCopied = GetRawInputData(m.LParam, RID_INPUT, rawBuffer, ref size, (uint)headerSize);
-            if (bytesCopied > 0 && bytesCopied <= 128) {
-                int lastX = Marshal.ReadInt32(rawBuffer, headerSize + 12);
-                int lastY = Marshal.ReadInt32(rawBuffer, headerSize + 16);
-
-                if (lastX != 0 || lastY != 0) {
-                    long currentTicks = Stopwatch.GetTimestamp();
-                    if (lastTicks != 0) {
-                        long delta = currentTicks - lastTicks;
-                        if (delta > 0) {
-                            double deltaSec = (double)delta / Stopwatch.Frequency;
-                            
-                            // Фильтр системных дуплетов очереди: при частоте порта 1000Hz пакеты физически
-                            // не могут приходить быстрее 0.45 мс (2200 Hz). Пакеты быстрее 0.45 мс — это
-                            // сдвоенная вычитка очереди Windows, их объединяем для корректного расчета джиттера.
-                            if (deltaSec >= 0.00045 && deltaSec < 0.04) {
-                                double instantHz = 1.0 / deltaSec;
-                                lock (hzHistory) {
-                                    currentHz = instantHz;
-                                    if (instantHz > peakHz) { peakHz = instantHz; }
-                                    hzHistory.Enqueue(instantHz);
-                                    if (hzHistory.Count > WINDOW_SIZE) { hzHistory.Dequeue(); }
-                                    totalSamples++;
-                                }
-                                lastTicks = currentTicks;
-                            }
-                        }
-                    } else {
-                        lastTicks = currentTicks;
-                    }
-                }
-            }
-        }
-        base.WndProc(ref m);
     }
 
     private void UpdateMetricsUI(bool isRu) {
-        double sum = 0;
-        int count = 0;
-        double currentCopy, peakCopy;
+        double[] samples;
+        double peakCopy;
+        long totalCopy;
 
-        lock (hzHistory) {
-            count = hzHistory.Count;
-            if (count > 0) {
-                foreach (double h in hzHistory) { sum += h; }
-                avgHz = sum / count;
-
-                // Расчет стандартного отклонения (Джиттер)
-                double varianceSum = 0;
-                foreach (double h in hzHistory) {
-                    double diff = h - avgHz;
-                    varianceSum += diff * diff;
-                }
-                jitterHz = Math.Sqrt(varianceSum / count);
-            }
-            currentCopy = currentHz;
+        lock (syncLock) {
+            samples = msHistory.ToArray();
             peakCopy = peakHz;
+            totalCopy = totalSamples;
         }
 
-        lblCurrentVal.Text = Math.Round(currentCopy) + " Hz";
+        double curHz = 0, avgHz = 0, jitterMs = 0, jitterHz = 0;
+        int count = samples.Length;
+
+        if (count > 0) {
+            double sumMs = 0;
+            for (int i = 0; i < count; i++) sumMs += samples[i];
+            double avgMs = sumMs / count;
+            avgHz = 1000.0 / avgMs;
+
+            int curWin = Math.Min(25, count);
+            double curSumMs = 0;
+            for (int i = count - curWin; i < count; i++) curSumMs += samples[i];
+            curHz = 1000.0 / (curSumMs / curWin);
+
+            double varMs = 0, varHz = 0;
+            for (int i = 0; i < count; i++) {
+                double dMs = samples[i] - avgMs;
+                varMs += dMs * dMs;
+                double dHz = (1000.0 / samples[i]) - avgHz;
+                varHz += dHz * dHz;
+            }
+            jitterMs = Math.Sqrt(varMs / count);
+            jitterHz = Math.Sqrt(varHz / count);
+        }
+
+        lblCurrentVal.Text = Math.Round(curHz) + " Hz";
         lblPeakVal.Text = Math.Round(peakCopy) + " Hz";
         lblAvgVal.Text = Math.Round(avgHz) + " Hz";
-        lblJitterVal.Text = "± " + Math.Round(jitterHz) + " Hz";
-        lblSampleCount.Text = (isRu ? "Пакетов получено: " : "Packets received: ") + totalSamples;
+        lblJitterMsVal.Text = "± " + jitterMs.ToString("0.00") + " ms";
+        lblJitterHzVal.Text = "(± " + Math.Round(jitterHz) + " Hz)";
+        lblSampleCount.Text = (isRu ? "Пакетов получено: " : "Packets received: ") + totalCopy;
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e) {
         if (updateTimer != null) { updateTimer.Stop(); updateTimer.Dispose(); }
-        if (rawBuffer != IntPtr.Zero) { Marshal.FreeHGlobal(rawBuffer); rawBuffer = IntPtr.Zero; }
+        if (sinkHandle != IntPtr.Zero) { PostMessage(sinkHandle, WM_STOP_SINK, IntPtr.Zero, IntPtr.Zero); }
+        if (sinkThread != null && sinkThread.IsAlive) { sinkThread.Join(500); }
+        if (sinkReady != null) { sinkReady.Close(); }
         base.OnFormClosed(e);
     }
 }
@@ -11882,7 +12179,9 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
     Exit
 }
 
-Write-Host "Запуск глубокой реанимации компонентов Центра обновлений Windows..." -ForegroundColor Cyan
+$global:IsRU = ((Get-UICulture).TwoLetterISOLanguageName -eq "ru")
+function L ([string]$Ru, [string]$En) { if ($global:IsRU) { return $Ru } else { return $En } }
+Write-Host (L "Запуск глубокой реанимации компонентов Центра обновлений Windows..." "Starting deep Windows Update repair...") -ForegroundColor Cyan
 
 # 1. Остановка зависимых служб
 $ServicesToStop = @("wuauserv", "cryptSvc", "bits", "msiserver", "dosvc", "waasmedicsvc")
@@ -11974,7 +12273,7 @@ cmd.exe /c "usoclient.exe ResetAuthorization >nul 2>&1"
 cmd.exe /c "usoclient.exe StartScan >nul 2>&1"
 
 $wshell = New-Object -ComObject Wscript.Shell
-$wshell.Popup("Компоненты Центра обновлений полностью реанимированы!`nКэш очищен, службы перезапущены, запущен поиск обновлений.", 6, "Eastrica Windows Update Reset", 64) | Out-Null
+$wshell.Popup((L "Компоненты Центра обновлений полностью реанимированы!`nКэш очищен, службы перезапущены, запущен поиск обновлений." "Windows Update components completely repaired!`nCache cleared, services restarted, update scan started."), 6, "Eastrica Windows Update Reset", 64) | Out-Null
 '@
 
 Apply-Tweak "Создание скрипта сброса Windows Update" { 
@@ -12590,6 +12889,8 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
     Exit
 }
 $wshell = New-Object -ComObject Wscript.Shell
+$global:IsRU = ((Get-UICulture).TwoLetterISOLanguageName -eq "ru")
+function L ([string]$Ru, [string]$En) { if ($global:IsRU) { return $Ru } else { return $En } }
 
 # 1. Разрешаем работу DoH и DoT в системе
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" -Name "EnableAutoDoh" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
@@ -12601,7 +12902,7 @@ $DefaultRoute = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Silentl
 $ActiveAdapter = if ($DefaultRoute) { Get-NetAdapter -InterfaceIndex $DefaultRoute.InterfaceIndex -ErrorAction SilentlyContinue } else { $null }
 
 if (-not $ActiveAdapter) {
-    $wshell.Popup("Активный интернет-адаптер не найден!", 3, "Ошибка сети", 16) | Out-Null
+    $wshell.Popup((L "Активный интернет-адаптер не найден!" "No active internet adapter found!"), 3, (L "Ошибка сети" "Network Error"), 16) | Out-Null
     exit
 }
 
@@ -12645,8 +12946,6 @@ $HybridProfiles = @(
 )
 
 $NetMenuShell = "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\EastricaToolsExtra\shell\03_NetworkMenu\shell"
-$global:IsRU = ((Get-UICulture).TwoLetterISOLanguageName -eq "ru")
-function L ([string]$Ru, [string]$En) { if ($global:IsRU) { return $Ru } else { return $En } }
 
 if ($Mode -eq "Hybrid") {
     # --------------------------------------------------------------------------
@@ -12711,7 +13010,7 @@ if ($Mode -eq "Hybrid") {
     }
 
     ipconfig /flushdns > $null
-    $wshell.Popup("Гибридный режим переключен на: [$SelectedName]!`nСетевая карта: $($BestCandidate.Name) ($LowestPing ms)`nБраузеры: $SelectedName DoH (AdBlock)", 5, "Сеть и DNS", 262208) | Out-Null
+    $wshell.Popup((L "Гибридный режим переключен на: [$SelectedName]!`nСетевая карта: $($BestCandidate.Name) ($LowestPing ms)`nБраузеры: $SelectedName DoH (AdBlock)" "Hybrid mode switched to: [$SelectedName]!`nAdapter: $($BestCandidate.Name) ($LowestPing ms)`nBrowsers: $SelectedName DoH (AdBlock)"), 5, (L "Сеть и DNS" "Network & DNS"), 262208) | Out-Null
 
     # Сбрасываем названия остальных кнопок
     Set-ItemProperty -Path "$NetMenuShell\02_DnsGame" -Name "MUIVerb" -Value (L "Игровой DNS (Cloudflare)" "Gaming DNS (Cloudflare)") -Force -ErrorAction SilentlyContinue
@@ -12747,7 +13046,7 @@ if ($Mode -eq "Hybrid") {
     cmd.exe /c "netsh dns add encryption server=1.0.0.1 dothost=${DotHost}:853 autoupgrade=yes udpfallback=yes >nul 2>&1"
 
     ipconfig /flushdns > $null
-    $wshell.Popup("Режим Киберспорта активирован!`nАдаптер: $($ActiveAdapter.Name)`nDNS: Cloudflare (DoH + DoT)", 4, "Сеть", 262208) | Out-Null
+    $wshell.Popup((L "Режим Киберспорта активирован!`nАдаптер: $($ActiveAdapter.Name)`nDNS: Cloudflare (DoH + DoT)" "eSports mode activated!`nAdapter: $($ActiveAdapter.Name)`nDNS: Cloudflare (DoH + DoT)"), 4, (L "Сеть" "Network"), 262208) | Out-Null
 
     Set-ItemProperty -Path "$NetMenuShell\01_DnsHybrid" -Name "MUIVerb" -Value (L "Гибридный DNS (Цикл перебора)" "Hybrid DNS (Cycle Providers)") -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path "$NetMenuShell\02_DnsGame" -Name "MUIVerb" -Value (L "✔ Игровой DNS (Cloudflare)" "✔ Gaming DNS (Cloudflare)") -Force -ErrorAction SilentlyContinue
@@ -12780,7 +13079,7 @@ if ($Mode -eq "Hybrid") {
     cmd.exe /c "netsh dns add encryption server=94.140.15.15 dothost=${DotHost}:853 autoupgrade=yes udpfallback=yes >nul 2>&1"
 
     ipconfig /flushdns > $null
-    $wshell.Popup("Блокировщик рекламы активирован!`nАдаптер: $($ActiveAdapter.Name)`nDNS: AdGuard (DoH + DoT)", 4, "Сеть", 262208) | Out-Null
+    $wshell.Popup((L "Блокировщик рекламы активирован!`nАдаптер: $($ActiveAdapter.Name)`nDNS: AdGuard (DoH + DoT)" "AdBlock DNS activated!`nAdapter: $($ActiveAdapter.Name)`nDNS: AdGuard (DoH + DoT)"), 4, (L "Сеть" "Network"), 262208) | Out-Null
 
     Set-ItemProperty -Path "$NetMenuShell\01_DnsHybrid" -Name "MUIVerb" -Value (L "Гибридный DNS (Цикл перебора)" "Hybrid DNS (Cycle Providers)") -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path "$NetMenuShell\02_DnsGame" -Name "MUIVerb" -Value (L "Игровой DNS (Cloudflare)" "Gaming DNS (Cloudflare)") -Force -ErrorAction SilentlyContinue
@@ -12813,7 +13112,7 @@ if ($Mode -eq "Hybrid") {
     cmd.exe /c "netsh dns add encryption server=149.112.112.112 dothost=${DotHost}:853 autoupgrade=yes udpfallback=yes >nul 2>&1"
 
     ipconfig /flushdns > $null
-    $wshell.Popup("Защитный режим активирован!`nАдаптер: $($ActiveAdapter.Name)`nDNS: Quad9 (DoH + DoT)", 4, "Сеть", 262208) | Out-Null
+    $wshell.Popup((L "Защитный режим активирован!`nАдаптер: $($ActiveAdapter.Name)`nDNS: Quad9 (DoH + DoT)" "Security DNS activated!`nAdapter: $($ActiveAdapter.Name)`nDNS: Quad9 (DoH + DoT)"), 4, (L "Сеть" "Network"), 262208) | Out-Null
 
     Set-ItemProperty -Path "$NetMenuShell\01_DnsHybrid" -Name "MUIVerb" -Value (L "Гибридный DNS (Цикл перебора)" "Hybrid DNS (Cycle Providers)") -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path "$NetMenuShell\02_DnsGame" -Name "MUIVerb" -Value (L "Игровой DNS (Cloudflare)" "Gaming DNS (Cloudflare)") -Force -ErrorAction SilentlyContinue
@@ -12827,7 +13126,7 @@ if ($Mode -eq "Hybrid") {
     Set-DnsClientServerAddress -InterfaceIndex $ActiveAdapter.InterfaceIndex -ResetServerAddresses
 
     ipconfig /flushdns > $null
-    $wshell.Popup("Сетевые настройки сброшены.`nУстановлен DNS провайдера по умолчанию.", 4, "Сеть", 262208) | Out-Null
+    $wshell.Popup((L "Сетевые настройки сброшены.`nУстановлен DNS провайдера по умолчанию." "Network settings reset.`nDefault ISP DNS restored."), 4, (L "Сеть" "Network"), 262208) | Out-Null
 
     Set-ItemProperty -Path "$NetMenuShell\01_DnsHybrid" -Name "MUIVerb" -Value (L "Гибридный DNS (Цикл перебора)" "Hybrid DNS (Cycle Providers)") -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path "$NetMenuShell\02_DnsGame" -Name "MUIVerb" -Value (L "Игровой DNS (Cloudflare)" "Gaming DNS (Cloudflare)") -Force -ErrorAction SilentlyContinue
@@ -12931,7 +13230,11 @@ if (!(Test-Path $RebootSafeMode)) { Apply-Tweak "Создание ключа Reb
 if (!(Test-Path "$RebootSafeMode\command")) { Apply-Tweak "Создание команды RebootToSafeMode" { New-Item -Path "$RebootSafeMode\command" -Force | Out-Null } }
 Apply-Tweak "Установка названия RebootToSafeMode" { Set-ItemProperty -Path $RebootSafeMode -Name "MUIVerb" -Value (L "Перезагрузка в безопасный режим" "Reboot to Safe Mode") -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Установка иконки RebootToSafeMode" { Set-ItemProperty -Path $RebootSafeMode -Name "Icon" -Value "msconfig.exe,0" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-$SafeModeRunCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$nl = [Environment]::NewLine; $ws = New-Object -ComObject Wscript.Shell; if ($ws.Popup(''Перезагрузить компьютер в БЕЗОПАСНЫЙ РЕЖИМ прямо сейчас?'' + $nl + $nl + ''Все несохраненные данные будут закрыты.'', 0, ''Безопасный режим'', 4 + 48) -eq 6) { Start-Process cmd.exe -ArgumentList ''/c bcdedit /set {current} safeboot network & reg add HKLM\Software\Microsoft\Windows\CurrentVersion\RunOnce /v *AutoRemoveSafeBoot /t REG_SZ /d \"cmd.exe /c bcdedit /deletevalue {current} safeboot\" /f & shutdown /r /f /t 00'' -Verb RunAs -WindowStyle Hidden }"'
+$SafeModeQ1 = L 'Перезагрузить компьютер в БЕЗОПАСНЫЙ РЕЖИМ прямо сейчас?' 'Reboot PC into SAFE MODE right now?'
+$SafeModeQ2 = L 'Все несохраненные данные будут закрыты.' 'All unsaved work will be closed.'
+$SafeModeTitle = L 'Безопасный режим' 'Safe Mode'
+# Вызов в RunOnce запускается с -Verb RunAs, чтобы bcdedit /deletevalue не получил отказ в доступе при включенном UAC
+$SafeModeRunCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$nl = [Environment]::NewLine; $ws = New-Object -ComObject Wscript.Shell; if ($ws.Popup(''' + $SafeModeQ1 + ''' + $nl + $nl + ''' + $SafeModeQ2 + ''', 0, ''' + $SafeModeTitle + ''', 4 + 48) -eq 6) { Start-Process cmd.exe -ArgumentList ''/c bcdedit /set {current} safeboot network & reg add HKLM\Software\Microsoft\Windows\CurrentVersion\RunOnce /v *AutoRemoveSafeBoot /t REG_SZ /d \"powershell.exe -NoProfile -WindowStyle Hidden -Command Start-Process bcdedit.exe -ArgumentList ''''/deletevalue {current} safeboot'''' -Verb RunAs -WindowStyle Hidden\" /f & shutdown /r /f /t 00'' -Verb RunAs -WindowStyle Hidden }"'
 Apply-Tweak "Привязка команды перезагрузки в Safe Mode" { Set-Item -Path "$RebootSafeMode\command" -Value $SafeModeRunCmd -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 $RebootBios = "$RebootShell\02_RebootToBios"
@@ -12939,7 +13242,10 @@ if (!(Test-Path $RebootBios)) { Apply-Tweak "Создание ключа RebootT
 if (!(Test-Path "$RebootBios\command")) { Apply-Tweak "Создание команды RebootToBios" { New-Item -Path "$RebootBios\command" -Force | Out-Null } }
 Apply-Tweak "Установка названия RebootToBios" { Set-ItemProperty -Path $RebootBios -Name "MUIVerb" -Value (L "Перезагрузка в BIOS (UEFI)" "Reboot to BIOS (UEFI)") -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Установка иконки RebootToBios" { Set-ItemProperty -Path $RebootBios -Name "Icon" -Value "shell32.dll,12" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-$BiosRunCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$nl = [Environment]::NewLine; $ws = New-Object -ComObject Wscript.Shell; if ($ws.Popup(''Перезагрузить компьютер в BIOS (UEFI) прямо сейчас?'' + $nl + $nl + ''Все несохраненные данные будут закрыты.'', 0, ''Вход в BIOS'', 4 + 48) -eq 6) { Start-Process cmd.exe -ArgumentList ''/c shutdown /r /fw /t 00'' -Verb RunAs -WindowStyle Hidden }"'
+$BiosQ1 = L 'Перезагрузить компьютер в BIOS (UEFI) прямо сейчас?' 'Reboot PC into BIOS (UEFI) right now?'
+$BiosQ2 = L 'Все несохраненные данные будут закрыты.' 'All unsaved work will be closed.'
+$BiosTitle = L 'Вход в BIOS' 'Enter BIOS'
+$BiosRunCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$nl = [Environment]::NewLine; $ws = New-Object -ComObject Wscript.Shell; if ($ws.Popup(''' + $BiosQ1 + ''' + $nl + $nl + ''' + $BiosQ2 + ''', 0, ''' + $BiosTitle + ''', 4 + 48) -eq 6) { Start-Process cmd.exe -ArgumentList ''/c shutdown /r /fw /t 00'' -Verb RunAs -WindowStyle Hidden }"'
 Apply-Tweak "Привязка команды перезагрузки в BIOS" { Set-Item -Path "$RebootBios\command" -Value $BiosRunCmd -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 Write-Host ""
@@ -13018,6 +13324,7 @@ $WinSearchPol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"
 if (!(Test-Path $WinSearchPol)) { Apply-Tweak "Создание раздела Windows Search Policy" { New-Item -Path $WinSearchPol -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
 Apply-Tweak "Отключение ИИ-генеративного поиска в Проводнике (Generative Search)" { Set-ItemProperty -Path $WinSearchPol -Name "DisableGenerativeSearch" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 Apply-Tweak "Запрет анализа поисковых запросов нейросетью (Context Analysis)" { Set-ItemProperty -Path $WinSearchPol -Name "DisableSearchContextAnalysis" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+Apply-Tweak "Отключение Кортаны (AllowCortana)" { Set-ItemProperty -Path $WinSearchPol -Name "AllowCortana" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 
 $Personalization = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
 if (Test-Path $Personalization) {
@@ -13165,15 +13472,13 @@ $WinNT = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows" # Ветк
 Apply-Tweak "Удаление мусорного твика GDIProcessHandleQuota" { Remove-ItemProperty -Path $WinNT -Name "GDIProcessHandleQuota" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаление твика
 Apply-Tweak "Удаление мусорного твика GdiBatchLimit" { Remove-ItemProperty -Path $WinNT -Name "GdiBatchLimit" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаление твика
 
-# [GUI] Аппаратное ускорение 2D графики (GDI+ to Direct2D Hardware Promotion)
-$Direct2D = "HKLM:\SOFTWARE\Microsoft\Direct2D" # Ветка Direct2D
-if (!(Test-Path $Direct2D)) { Apply-Tweak "Создание раздела Direct2D" { New-Item $Direct2D -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } } # Создаем
-if ($global:IsMultiMonitor) {
-    Apply-Tweak "Отключение принудительного рендера 2D видеокартой (Защита DWM)" { Remove-ItemProperty -Path $Direct2D -Name "EnableGdiDxgiSurface" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    Apply-Tweak "Отключение многопоточности GDI/DXGI (Защита DWM)" { Remove-ItemProperty -Path $Direct2D -Name "EnableMultithreadedGdiDxgiSurface" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-} else {
-    Apply-Tweak "Аппаратный рендер 2D-графики видеокартой (EnableGdiDxgiSurface)" { Set-ItemProperty -Path $Direct2D -Name "EnableGdiDxgiSurface" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    Apply-Tweak "Многопоточность для конвейера GDI/DXGI" { Set-ItemProperty -Path $Direct2D -Name "EnableMultithreadedGdiDxgiSurface" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+# Очистка невалидных параметров из ветки Direct2D (d2d1.dll их не использует)
+$Direct2D = "HKLM:\SOFTWARE\Microsoft\Direct2D"
+if (Test-Path $Direct2D) {
+    Apply-Tweak "Очистка невалидных параметров EnableGdiDxgiSurface и EnableMultithreadedGdiDxgiSurface" {
+        Remove-ItemProperty -Path $Direct2D -Name "EnableGdiDxgiSurface" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        Remove-ItemProperty -Path $Direct2D -Name "EnableMultithreadedGdiDxgiSurface" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    }
 }
 
 Write-Host ""
@@ -13269,7 +13574,7 @@ if ($global:OptAI) {
     # Тюнинг процессора для Llama.cpp / GGUF
     $PhysicalCores = ($global:ProcInfo).NumberOfCores
     Apply-Tweak "Ограничение потоков OpenMP физическими ядрами ($PhysicalCores)" { [Environment]::SetEnvironmentVariable("OMP_NUM_THREADS", "$PhysicalCores", "Machine") } # Ограничиваем OpenMP числом физических ядер
-    Apply-Tweak "Запрет сна потоков OpenMP (KMP_BLOCKTIME=0)" { [Environment]::SetEnvironmentVariable("KMP_BLOCKTIME", "0", "Machine") } # 0 = Потоки не засыпают между генерацией токенов
+    Apply-Tweak "Intel OpenMP: активное ожидание перед сном — 0 мс" { [Environment]::SetEnvironmentVariable("KMP_BLOCKTIME", "0", "Machine") } # Intel OpenMP: 0 мс активного ожидания после параллельного участка.
     Apply-Tweak "Жесткая привязка потоков KMP (Affinity)" { [Environment]::SetEnvironmentVariable("KMP_AFFINITY", "granularity=fine,compact,1,0", "Machine") } # Жесткая привязка потоков
     Apply-Tweak "Отключение унифицированной памяти CUDA (GGML)" { [Environment]::SetEnvironmentVariable("GGML_CUDA_ENABLE_UNIFIED_MEMORY", "0", "Machine") }
     Apply-Tweak "Активная политика ожидания OpenMP" { [Environment]::SetEnvironmentVariable("OMP_WAIT_POLICY", "ACTIVE", "Machine") }
@@ -13332,8 +13637,8 @@ if ($global:OptAI) {
         }
     }
 
+    Apply-Tweak "Сброс ошибочной переменной PYTHONUNBUFFERED" { [Environment]::SetEnvironmentVariable("PYTHONUNBUFFERED", $null, "Machine") }
     # Отключение телеметрии фреймворков ИИ
-    Apply-Tweak "Отключение телеметрии Python" { [Environment]::SetEnvironmentVariable("PYTHONUNBUFFERED", "0", "Machine") }
     Apply-Tweak "Отключение телеметрии HuggingFace" { [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_TELEMETRY", "1", "Machine") }
     Apply-Tweak "Отключение аналитики Gradio" { [Environment]::SetEnvironmentVariable("GRADIO_ANALYTICS_ENABLED", "False", "Machine") }
     Apply-Tweak "Включение DO_NOT_TRACK" { [Environment]::SetEnvironmentVariable("DO_NOT_TRACK", "1", "Machine") }
@@ -13372,7 +13677,10 @@ if ($global:OptAI) {
         Apply-Tweak "Создание белого списка SmartScreen для форматов ИИ" { Set-ItemProperty -Path $LowRiskTypes -Name "LowRiskFileTypes" -Value $AITypes -Type String -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
     }
     
-    Apply-Tweak "Добавление кэша ИИ в исключения Защитника Windows" { Add-MpPreference -ExclusionPath $SafeAICache *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Добавляем кэш в исключения Defender
+    Apply-Tweak "Добавление кэша ИИ в исключения Защитника Windows" {
+        if ((Get-Service -Name "WinDefend" -ErrorAction SilentlyContinue).Status -ne 'Running') { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+        Add-MpPreference -ExclusionPath $SafeAICache *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    } # Добавляем кэш в исключения Defender
     try {
         $item = Get-Item -LiteralPath $SafeAICache -ErrorAction Stop
         if (($item.Attributes -band [System.IO.FileAttributes]::NotContentIndexed) -ne [System.IO.FileAttributes]::NotContentIndexed) {
@@ -13481,7 +13789,10 @@ systemd=true
     $AiDirs = @("$RealUserProfile\.cache", "$RealUserProfile\.ollama", "$RealUserProfile\.lmstudio", "$RealUserProfile\.triton", "$RealLocalAppData\pip")
     foreach ($dir in $AiDirs) {
         if (!(Test-Path $dir)) { Apply-Tweak "Создание каталога ИИ ($dir)" { New-Item -ItemType Directory -Force -Path $dir *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-        Apply-Tweak "Исключение каталога ИИ в Defender ($dir)" { Add-MpPreference -ExclusionPath $dir *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+        Apply-Tweak "Исключение каталога ИИ в Defender ($dir)" {
+            if ((Get-Service -Name "WinDefend" -ErrorAction SilentlyContinue).Status -ne 'Running') { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+            Add-MpPreference -ExclusionPath $dir *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        }
         try {
             $item = Get-Item -LiteralPath $dir -ErrorAction Stop
             if (($item.Attributes -band [System.IO.FileAttributes]::NotContentIndexed) -ne [System.IO.FileAttributes]::NotContentIndexed) {
@@ -13521,7 +13832,10 @@ systemd=true
 
         if ($AISelectedFolders.Count -gt 0) {
             foreach ($dir in $AISelectedFolders) {
-                Apply-Tweak "Исключение папки ИИ в Defender ($dir)" { Add-MpPreference -ExclusionPath $dir *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                Apply-Tweak "Исключение папки ИИ в Defender ($dir)" {
+                    if ((Get-Service -Name "WinDefend" -ErrorAction SilentlyContinue).Status -ne 'Running') { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+                    Add-MpPreference -ExclusionPath $dir *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                }
                 try {
                     $item = Get-Item -LiteralPath $dir -ErrorAction Stop
                     if (($item.Attributes -band [System.IO.FileAttributes]::NotContentIndexed) -ne [System.IO.FileAttributes]::NotContentIndexed) {
@@ -13544,8 +13858,14 @@ systemd=true
         Write-Host " ► Автоматический режим (Session 0 / SYSTEM). Выбор папок ИИ пропущен." -ForegroundColor DarkGray
     }
     
-    Apply-Tweak "Исключение форматов ИИ в Defender" { Add-MpPreference -ExclusionExtension ".vhdx", ".vhd", ".gguf", ".safetensors", ".pt", ".bin", ".onnx", ".tensorrt" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    Apply-Tweak "Исключение процессов ИИ в Defender" { Add-MpPreference -ExclusionProcess "python.exe", "ollama.exe", "llama-server.exe", "docker.exe", "node.exe", "cl.exe", "cmake.exe", "ninja.exe", "git.exe", "rustc.exe", "cargo.exe", "link.exe" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+    Apply-Tweak "Исключение форматов ИИ в Defender" {
+        if ((Get-Service -Name "WinDefend" -ErrorAction SilentlyContinue).Status -ne 'Running') { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+        Add-MpPreference -ExclusionExtension ".vhdx", ".vhd", ".gguf", ".safetensors", ".pt", ".bin", ".onnx", ".tensorrt" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    }
+    Apply-Tweak "Исключение процессов ИИ в Defender" {
+        if ((Get-Service -Name "WinDefend" -ErrorAction SilentlyContinue).Status -ne 'Running') { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+        Add-MpPreference -ExclusionProcess "python.exe", "ollama.exe", "llama-server.exe", "docker.exe", "node.exe", "cl.exe", "cmake.exe", "ninja.exe", "git.exe", "rustc.exe", "cargo.exe", "link.exe" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    }
 
     # Кнопка быстрой очистки памяти ИИ в меню Eastrica Tools
     $AiMenuKey = "HKCR:\Directory\Background\shell\EastricaTools\shell\00_AIFlush"
@@ -13672,6 +13992,45 @@ function Write-Log {
     } catch {}
 }
 
+# Ведём журнал один раз для каждой пары PID/ошибка.
+# Неподдерживаемую топологию достаточно записать один раз за запуск.
+$script:AffinityWarnings = @{}
+
+function Set-DirectorAffinity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$ProcessId,
+
+        [Parameter(Mandatory = $true)]
+        [uint64]$Mask
+    )
+
+    $result = [WinAPI]::SetAffinityFast($ProcessId, $Mask)
+
+    if ($result -eq 0) {
+        return
+    }
+
+    if ($result -eq -1) {
+        $key = 'MultipleProcessorGroups'
+        $message = 'Привязка пропущена: в системе несколько групп процессоров, а директор рассчитывает маски только для группы 0.'
+    }
+    elseif ($result -eq -2) {
+        $key = 'PointerWidth'
+        $message = 'Привязка пропущена: маска не помещается в указатель текущего процесса PowerShell.'
+    }
+    else {
+        $key = '{0}/{1}' -f $ProcessId, $result
+        $description = [System.ComponentModel.Win32Exception]::new($result).Message
+        $message = 'Не удалось назначить маску 0x{0:X} процессу PID {1}. Win32 {2}: {3}' -f $Mask, $ProcessId, $result, $description
+    }
+
+    if (-not $script:AffinityWarnings.ContainsKey($key)) {
+        $script:AffinityWarnings[$key] = $true
+        Write-Log $message "WARN"
+    }
+}
+
 function Set-WlanAutoConfig {
     param([bool]$Enable)
     $state = if ($Enable) { "yes" } else { "no" }
@@ -13685,6 +14044,19 @@ function Set-WlanAutoConfig {
 }
 
 Write-Log "=== Запуск Eastrica Thread Director ==="
+
+# Авто-запрос прав администратора (до компиляции DLL и работы с процессами; пути оборачиваются в кавычки из-за пробелов)
+if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Write-Log "Запрос прав Администратора..." "WARN"
+    $ArgsList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$($MyInvocation.MyCommand.Path)`"")
+    if ($TargetApp) { 
+        $CleanApp = $TargetApp.Trim('"')
+        $ArgsList += "-TargetApp"
+        $ArgsList += "`"$CleanApp`""
+    }
+    Start-Process powershell.exe -ArgumentList $ArgsList -Verb RunAs -WindowStyle Hidden
+    Exit # Закрываем процесс без прав
+}
 
 $CS = @"
 using System;
@@ -13767,13 +14139,51 @@ public class WinAPI {
         return "";
     }
 
-    [DllImport("kernel32.dll")]
-    public static extern bool SetProcessAffinityMask(IntPtr hProcess, UIntPtr dwProcessAffinityMask);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetProcessAffinityMask(
+        IntPtr hProcess,
+        UIntPtr dwProcessAffinityMask
+    );
 
-    public static void SetAffinityFast(int pid, ulong mask) {
-        IntPtr hProc = OpenProcess(0x0200, false, pid);
-        if (hProc != IntPtr.Zero) {
-            SetProcessAffinityMask(hProc, (UIntPtr)mask);
+    [DllImport("kernel32.dll")]
+    private static extern ushort GetActiveProcessorGroupCount();
+
+    // Количество активных групп для данного запуска Thread Director.
+    // Исходный GetTopologyMasks строит маски только для группы 0.
+    private static readonly ushort AffinityGroupCount =
+        GetActiveProcessorGroupCount();
+
+    // Возврат: 0 — маска применена; положительное число — ошибка Win32.
+    // -1 — несколько групп; -2 — маска не помещается в указатель процесса.
+    public static int SetAffinityFast(int pid, ulong mask) {
+        const uint PROCESS_SET_INFORMATION = 0x0200;
+        const int ERROR_INVALID_PARAMETER = 87;
+
+        if (pid <= 0 || mask == 0) {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        if (AffinityGroupCount != 1) {
+            return -1;
+        }
+
+        if (UIntPtr.Size == 4 && mask > UInt32.MaxValue) {
+            return -2;
+        }
+
+        IntPtr hProc = OpenProcess(PROCESS_SET_INFORMATION, false, pid);
+        if (hProc == IntPtr.Zero) {
+            return Marshal.GetLastWin32Error();
+        }
+
+        try {
+            if (!SetProcessAffinityMask(hProc, new UIntPtr(mask))) {
+                return Marshal.GetLastWin32Error();
+            }
+
+            return 0;
+        }
+        finally {
             CloseHandle(hProc);
         }
     }
@@ -13809,7 +14219,14 @@ public class WinAPI {
 
     [DllImport("ntdll.dll")] public static extern uint RtlAdjustPrivilege(int Privilege, bool bEnablePrivilege, bool IsThreadPrivilege, out bool PreviousValue);
     [DllImport("ntdll.dll")] public static extern int NtSetSystemInformation(int SystemInformationClass, ref int SystemInformation, int SystemInformationLength);
-    [DllImport("ntdll.dll")] public static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out int CurrentResolution);
+    // DesiredResolution и CurrentResolution измеряются в единицах по 100 нс.
+    // BOOLEAN в этом API занимает 1 байт. Возвращаемое значение — NTSTATUS.
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    public static extern int NtSetTimerResolution(
+        uint DesiredResolution,
+        [MarshalAs(UnmanagedType.U1)] bool SetResolution,
+        out uint CurrentResolution
+    );
     
     [DllImport("ntdll.dll")] public static extern int NtSetInformationProcess(IntPtr processHandle, int processInformationClass, ref int processInformation, int processInformationLength);
     [DllImport("ntdll.dll")] public static extern int NtSetInformationProcess(IntPtr processHandle, int processInformationClass, ref uint processInformation, int processInformationLength);
@@ -14166,7 +14583,7 @@ public class HotKeyManager : System.Windows.Forms.NativeWindow, IDisposable {
 }
 "@
 try {
-    $DirectorDll = "$env:SystemDrive\EastricaTools\Scripts\EastricaDirectorCore.dll"
+    $DirectorDll = "$env:SystemDrive\EastricaTools\Scripts\EastricaDirectorCore_AffinityStatus.dll"
     if (-not ("WinAPI" -as [type])) {
         if (Test-Path $DirectorDll) {
             # Загружаем ранее скомпилированную библиотеку с диска
@@ -14194,26 +14611,13 @@ foreach ($app in $FailsafeApps) {
             [WinAPI]::SetPriorityFast($_.Id, 0x00000020) # NORMAL
             [WinAPI]::SetMemoryPriority($_.Id, 5)
             [WinAPI]::DisableEcoMode($_.Id)
-            [WinAPI]::SetAffinityFast($_.Id, $InitFullMask) # Разрешаем все реально существующие ядра
+            Set-DirectorAffinity -ProcessId $_.Id -Mask $InitFullMask # Разрешаем все реально существующие ядра
         } catch {}
     }
 }
 
 # Выдаем самому Директору приоритет HIGH, чтобы он не завис при 100% нагрузке процессора игрой
 try { (Get-Process -Id $PID).PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High } catch {}
-
-# 1. Авто-запрос прав администратора
-if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Write-Log "Запрос прав Администратора..." "WARN"
-    $ArgsList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", $MyInvocation.MyCommand.Path)
-    if ($TargetApp) { 
-        $CleanApp = $TargetApp.Trim('"')
-        $ArgsList += "-TargetApp"
-        $ArgsList += $CleanApp 
-    }
-    Start-Process powershell.exe -ArgumentList $ArgsList -Verb RunAs -WindowStyle Hidden
-    Exit # Закрываем процесс без прав
-}
 
 # PerfOS оставляем включенным, иначе программы мониторинга (HWiNFO, Afterburner, замер DPC) ломаются
 Write-Log "Проверка целостности счетчиков производительности..."
@@ -14462,11 +14866,15 @@ try {
 $RegDir = "HKCU:\Software\Eastrica\ThreadDirector"
 $SavedConfig = Get-ItemProperty -Path $RegDir -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log
 
+$TotalRamBytes = 0
+try { $TotalRamBytes = [uint64](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory } catch {}
+$script:IsAutoFlushBlocked = ($TotalRamBytes -gt 0 -and $TotalRamBytes -le 16GB)
+
 if ($null -ne $SavedConfig) {
     if ($SavedConfig.KillExplorer -eq 1) { $chkKillExplorer.Checked = $true }
     if ($SavedConfig.DisableSMT -eq 1) { $chkSMT.Checked = $true }
     if ($SavedConfig.BlackoutMonitors -eq 1) { $chkMonitors.Checked = $true }
-    if ($SavedConfig.AutoFlush -eq 1) { $chkAutoFlush.Checked = $true }
+    if (-not $script:IsAutoFlushBlocked -and $SavedConfig.AutoFlush -eq 1) { $chkAutoFlush.Checked = $true }
     if ($SavedConfig.DisableBattery -eq 1) { $chkBattery.Checked = $true }
     if ($SavedConfig.ExplorerEco -eq 1 -or $SavedConfig.FreezeDWM -eq 1) { $chkExplorerEco.Checked = $true }
     if (-not [string]::IsNullOrWhiteSpace($SavedConfig.Whitelist)) {
@@ -14476,6 +14884,14 @@ if ($null -ne $SavedConfig) {
     }
 } else {
     $txtWhitelist.Text = "discord, telegram, obs64, ts3client"
+}
+
+if ($script:IsAutoFlushBlocked) {
+    $chkAutoFlush.Checked = $false
+    $chkAutoFlush.Enabled = $false
+    $chkAutoFlush.ForeColor = [System.Drawing.Color]::Gray
+    $chkAutoFlush.Text = (L "Защита от утечек ОЗУ (Заблокировано: <= 16 ГБ ОЗУ)" "RAM leak protection (Locked: <= 16 GB RAM)")
+    Set-ItemProperty -Path $RegDir -Name "AutoFlush" -Value 0 -Type DWord -Force 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | Out-Null
 }
 
 # Обработчики событий (Синхронное сохранение)
@@ -14563,14 +14979,18 @@ $script:IsDualCcdX3D = ($CpuName -match "7900X3D|7950X3D|9900X3D|9950X3D")
 
 # Получаем точные битовые маски напрямую из ядра Windows без хрупкого парсинга названий CPU
 $topoMasks = [WinAPI]::GetTopologyMasks($chkSMT.Checked)
-[uint64]$FullMask  = $topoMasks[0]
-[uint64]$GameMask  = $topoMasks[1]
-[uint64]$TrashMask = $topoMasks[2]
-$script:GameMask   = $GameMask
-Write-Log ("Аппаратные маски CPU Set: Full=0x{0:X}, Game=0x{1:X}, Eco/Trash=0x{2:X}" -f $FullMask, $GameMask, $TrashMask)
+[uint64]$script:FullMask  = $topoMasks[0]
+[uint64]$script:GameMask  = $topoMasks[1]
+[uint64]$script:TrashMask = $topoMasks[2]
+Write-Log ("Аппаратные маски CPU Set: Full=0x{0:X}, Game=0x{1:X}, Eco/Trash=0x{2:X}" -f $script:FullMask, $script:GameMask, $script:TrashMask)
 
 # Глобальные переменные отслеживания состояния
 $script:LockedPID = 0
+
+# Один активный запрос на процесс Thread Director.
+# 5000 × 100 нс = 0,5 мс. Реальное значение возвращает Windows.
+[uint32]$script:RequestedTimerResolution = 5000
+$script:TimerRequestActive = $false
 $script:IsExplorerHidden = $false
 $script:IsMonitorsDisabled = $false
 $script:IsBatteryDisabled = $false
@@ -14608,8 +15028,11 @@ function Restore-SystemState {
         Set-ItemProperty -Path $NocPath -Name "NOC_GLOBAL_SETTING_TOASTS_STATE" -Value 1 -Type DWord -Force 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log
     } catch {}
 
-    # Снимаем флаг активности игры в реестре
-    try { Set-ItemProperty -Path "HKLM:\SOFTWARE\Eastrica" -Name "GameActive" -Value 0 -Type DWord -Force 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log } catch {}
+    # Снимаем флаг активности игры в реестре (предварительно убедившись, что ветка существует)
+    try {
+        if (!(Test-Path "HKLM:\SOFTWARE\Eastrica")) { New-Item -Path "HKLM:\SOFTWARE\Eastrica" -Force | Out-Null }
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Eastrica" -Name "GameActive" -Value 0 -Type DWord -Force 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log
+    } catch {}
     
     Write-Log "Синхронизация квантов планировщика Eastrica (Win32PrioritySeparation = 38)..."
     # 38 (0x26): Short, Variable, High Foreground Boost (сохраняет удлинение кванта активному окну)
@@ -14640,17 +15063,35 @@ function Restore-SystemState {
     # 4. Разрешаем ПК уходить в спящий режим
     try { [WinAPI]::AllowSleep() } catch {}
     
-    # 5. Возвращаем стандартное разрешение таймера ядра Windows
-    try { 
-        $currentRes = 0
-        [WinAPI]::NtSetTimerResolution(5000, $false, [ref]$currentRes) | Out-Null 
-    } catch {}
+    # 5. Освобождаем только успешный запрос этого экземпляра директора.
+    if ($script:TimerRequestActive) {
+        [uint32]$currentRes = 0
+
+        try {
+            $status = [WinAPI]::NtSetTimerResolution(
+                $script:RequestedTimerResolution,
+                $false,
+                [ref]$currentRes
+            )
+
+            if ($status -ge 0) {
+                $script:TimerRequestActive = $false
+                Write-Log "Запрос таймера Thread Director освобождён."
+            }
+            else {
+                Write-Log ("Не удалось освободить таймер. NTSTATUS 0x{0:X8}." -f $status) "WARN"
+            }
+        }
+        catch {
+            Write-Log ("Ошибка освобождения таймера: " + $_.Exception.Message) "WARN"
+        }
+    }
     
     # 6. Снимаем изоляцию с Оконного Менеджера (DWM) и Проводника (Explorer)
     Get-Process -Name "dwm", "explorer" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | ForEach-Object {
         try { 
             [WinAPI]::SetPriorityFast($_.Id, 0x00000020) # 0x20 = NORMAL_PRIORITY_CLASS
-            [WinAPI]::SetAffinityFast($_.Id, $FullMask)  # Разрешаем им снова работать на всех ядрах процессора
+            Set-DirectorAffinity -ProcessId $_.Id -Mask $script:FullMask  # Разрешаем им снова работать на всех ядрах процессора
         } catch {}
     }
 
@@ -14701,7 +15142,7 @@ function Restore-SystemState {
                 [WinAPI]::SetMemoryPriority($pidToResume, 5) # Возвращаем приоритет памяти в норму (5)
                 [WinAPI]::SetIoPriority($pidToResume, 2)     # Возвращаем стандартный дисковый приоритет I/O (2 = Normal)
                 [WinAPI]::DisableEcoMode($pidToResume)       # Отключаем ограничение тактов (Eco Mode)
-                [WinAPI]::SetAffinityFast($pidToResume, $FullMask) # Разрешаем процессам использовать нормальные ядра
+                Set-DirectorAffinity -ProcessId $pidToResume -Mask $script:FullMask # Разрешаем процессам использовать нормальные ядра
             } catch {}
         }
         $script:SuspendedPIDs = @() # Очищаем массив
@@ -14724,12 +15165,18 @@ function Restore-SystemState {
         Get-Process -Name $t -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | ForEach-Object {
             try { 
                 [WinAPI]::SetPriorityFast($_.Id, 0x00000020) # NORMAL
-                [WinAPI]::SetAffinityFast($_.Id, $FullMask) 
+                [WinAPI]::SetAffinityFast($_.Id, $script:FullMask) 
             } catch {}
         }
     }
     
+    # Глобальные переменные отслеживания состояния
     $script:LockedPID = 0
+    
+    # Один активный запрос на процесс Thread Director.
+    # 5000 × 100 нс = 0,5 мс. Реальное значение возвращает Windows.
+    [uint32]$script:RequestedTimerResolution = 5000
+    $script:TimerRequestActive = $false
     try { 
         [WinAPI]::FlushSystemCacheAndStandby()
         [System.GC]::Collect()
@@ -14798,6 +15245,17 @@ $timer.Interval = 2000
 $ProcessWatcherLogic = {
     try {
         if ($script:LockedPID -eq 0) {
+            # Если нажат Panic Hotkey (Ctrl+Shift+F12) еще в режиме ожидания — выходим сразу, не дожидаясь запуска игры
+            if ([HotKeyManager]::PanicTriggered) {
+                [HotKeyManager]::PanicTriggered = $false
+                Write-Log "Нажат Panic Hotkey (Ctrl+Shift+F12) в режиме ожидания. Выход." "WARN"
+                $timer.Stop()
+                try { [WinAPI]::StopForegroundHook() } catch {}
+                if ($global:hkManager) { try { $global:hkManager.Dispose() } catch {} }
+                try { if ($notifyIcon) { $form.Invoke([action]{ $notifyIcon.Visible = $false; $notifyIcon.Dispose() }) } } catch {}
+                try { $form.Invoke([action]{ $form.Dispose() }) } catch {}
+                [System.Environment]::Exit(0)
+            }
             # --- Игра еще не найдена ---
             $hWnd = [WinAPI]::GetForegroundWindow() # Получаем ID окна, которое сейчас на переднем плане (В фокусе)
             if ($hWnd -ne [IntPtr]::Zero) {
@@ -14834,13 +15292,16 @@ $ProcessWatcherLogic = {
                                 Get-Process -Name "obs64", "discord", "ts3client" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | ForEach-Object {
                                     try {
                                         [WinAPI]::SetPriorityFast($_.Id, 0x00008000) # ABOVE_NORMAL_PRIORITY (Выше среднего)
-                                        [WinAPI]::SetAffinityFast($_.Id, $script:GameMask)  # Оставляем OBS/Discord на мощных P-Cores
+                                        Set-DirectorAffinity -ProcessId $_.Id -Mask $script:GameMask  # Оставляем OBS/Discord на мощных P-Cores
                                         Write-Log "Режим Стримера: Защищен процесс $($_.ProcessName)"
                                     } catch {}
                                 }
                                 
-                                # Пишем статус игры в глобальный реестр (полезно для сторонних скриптов)
-                                try { Set-ItemProperty -Path "HKLM:\SOFTWARE\Eastrica" -Name "GameActive" -Value 1 -Type DWord -Force 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log } catch {}
+                                # Пишем статус игры в глобальный реестр (создаём ветку при отсутствии для защиты AutoPowerSwitch)
+                                try {
+                                    if (!(Test-Path "HKLM:\SOFTWARE\Eastrica")) { New-Item -Path "HKLM:\SOFTWARE\Eastrica" -Force | Out-Null }
+                                    Set-ItemProperty -Path "HKLM:\SOFTWARE\Eastrica" -Name "GameActive" -Value 1 -Type DWord -Force 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log
+                                } catch {}
                                 
                                 # Прячем конфигуратор (Окно GUI) и включаем иконку в трее через Invoke (защита от потоков)
                                 if ($form.Visible) {
@@ -14893,14 +15354,36 @@ $ProcessWatcherLogic = {
                                     [WinAPI]::DisableEcoMode($script:LockedPID)
                                 } catch {}
                                 $currentRes = 0
-                                [WinAPI]::NtSetTimerResolution(5000, $true, [ref]$currentRes) | Out-Null # Ускоряем глобальный системный таймер ядра до 0.5 мс (Максимальная отзывчивость движка игры)
+                                if (-not $script:TimerRequestActive) {
+                                    [uint32]$currentRes = 0
+                                
+                                    try {
+                                        $status = [WinAPI]::NtSetTimerResolution(
+                                            $script:RequestedTimerResolution,
+                                            $true,
+                                            [ref]$currentRes
+                                        )
+                                
+                                        if ($status -ge 0) {
+                                            $script:TimerRequestActive = $true
+                                            $actualMs = $currentRes / 10000.0
+                                            Write-Log ("Таймер: запрошено 0,5 мс. Windows вернула {0:F4} мс." -f $actualMs)
+                                        }
+                                        else {
+                                            Write-Log ("Запрос таймера отклонён. NTSTATUS 0x{0:X8}." -f $status) "WARN"
+                                        }
+                                    }
+                                    catch {
+                                        Write-Log ("Ошибка вызова NtSetTimerResolution: " + $_.Exception.Message) "WARN"
+                                    }
+                                }
                                 
                                 # Применяем приоритет Above Normal (0x00008000 — не вызывает голодания csrss.exe/звука), удержание страниц (5), I/O (2), маску ядер и кванты 38 (0x26)
                                 try {
                                     [WinAPI]::SetPriorityFast($script:LockedPID, 0x00008000)
                                     [WinAPI]::SetMemoryPriority($script:LockedPID, 5)
                                     [WinAPI]::SetIoPriority($script:LockedPID, 2)
-                                    [WinAPI]::SetAffinityFast($script:LockedPID, $script:GameMask)
+                                    Set-DirectorAffinity -ProcessId $script:LockedPID -Mask $script:GameMask
                                     [WinAPI]::SetPrioritySeparation(38)
                                 } catch {}
 
@@ -14909,7 +15392,7 @@ $ProcessWatcherLogic = {
                                     try { 
                                         if ($script:optExplorerEco) {
                                             [WinAPI]::SetPriorityFast($_.Id, 0x00000040) # IDLE_PRIORITY_CLASS
-                                            [WinAPI]::SetAffinityFast($_.Id, $TrashMask)
+                                            Set-DirectorAffinity -ProcessId $_.Id -Mask $script:TrashMask
                                         }
                                     } catch {} 
                                 }
@@ -14982,7 +15465,7 @@ $ProcessWatcherLogic = {
                                         if (-not $isWhitelisted) {
                                             try { 
                                                 [WinAPI]::SetPriorityFast($_.Id, 0x00000040) # IDLE PRIORITY (Самый низкий приоритет ЦП)
-                                                [WinAPI]::SetAffinityFast($_.Id, $TrashMask) # Выкидываем лаунчеры на E-ядра
+                                                [WinAPI]::SetAffinityFast($_.Id, $script:TrashMask) # Выкидываем лаунчеры на E-ядра
                                             } catch {}
                                         }
                                     }
@@ -15004,7 +15487,7 @@ $ProcessWatcherLogic = {
                                                         [WinAPI]::SetMemoryPriority($tPid, 1)        # 1 = Самый низкий приоритет страниц памяти ОЗУ
                                                         [WinAPI]::SetIoPriority($tPid, 0)            # 0 = Самый низкий приоритет диска (VeryLow I/O), исключающий фризы SSD во время игры
                                                         [WinAPI]::EnableEcoMode($tPid)               # Включаем EcoQoS и блокируем фоновые запросы к системному таймеру
-                                                        [WinAPI]::SetAffinityFast($tPid, $TrashMask) # Сбрасываем на энергоэффективные ядра
+                                                        Set-DirectorAffinity -ProcessId $tPid -Mask $script:TrashMask # Сбрасываем на энергоэффективные ядра
                                                         $script:SuspendedPIDs += $tPid 
                                                     } catch {}
                                                 }
@@ -15107,7 +15590,7 @@ $ProcessWatcherLogic = {
                     # При сворачивании игры (Alt+Tab)
                     if ($script:optExplorerEco) {
                         Get-Process -Name "explorer" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | ForEach-Object { 
-                            try { [WinAPI]::SetAffinityFast($_.Id, $TrashMask) } catch {} 
+                            try { [WinAPI]::SetAffinityFast($_.Id, $script:TrashMask) } catch {} 
                         }
                         Get-Process -Name "dwm" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | ForEach-Object { 
                             try { [WinAPI]::SetAffinityFast($_.Id, $script:GameMask) } catch {} 
@@ -15121,7 +15604,7 @@ $ProcessWatcherLogic = {
                             [WinAPI]::SetMemoryPriority($susPid, 5)       # Возвращаем нормальный приоритет RAM
                             [WinAPI]::SetIoPriority($susPid, 2)           # Возвращаем нормальный приоритет диска I/O
                             [WinAPI]::DisableEcoMode($susPid)             # Выключаем Eco Mode
-                            [WinAPI]::SetAffinityFast($susPid, $FullMask) # Разрешаем работать на всех ядрах
+                            Set-DirectorAffinity -ProcessId $susPid -Mask $script:FullMask # Разрешаем работать на всех ядрах
                         } catch {}
                     }
                 } 
@@ -15166,14 +15649,14 @@ $ProcessWatcherLogic = {
                             [WinAPI]::SetMemoryPriority($susPid, 1)
                             [WinAPI]::SetIoPriority($susPid, 0)
                             [WinAPI]::EnableEcoMode($susPid)
-                            [WinAPI]::SetAffinityFast($susPid, $TrashMask)
+                            Set-DirectorAffinity -ProcessId $susPid -Mask $script:TrashMask
                         } catch {}
                     }
 
                     # При возврате в игру
                     if ($script:optExplorerEco) {
                         Get-Process -Name "explorer" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | ForEach-Object { 
-                            try { [WinAPI]::SetAffinityFast($_.Id, $TrashMask) } catch {} 
+                            try { [WinAPI]::SetAffinityFast($_.Id, $script:TrashMask) } catch {} 
                         }
                         Get-Process -Name "dwm" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log | ForEach-Object { 
                             try { [WinAPI]::SetAffinityFast($_.Id, $script:GameMask) } catch {} 
@@ -15272,15 +15755,14 @@ $btnLaunch.Add_Click({
     $script:optBattery = $chkBattery.Checked
     $script:optExplorerEco = $chkExplorerEco.Checked
     $script:optKillExplorer = $chkKillExplorer.Checked
-    $script:optAutoFlush = $chkAutoFlush.Checked
+    $script:optAutoFlush = $chkAutoFlush.Checked -and (-not $script:IsAutoFlushBlocked)
     $script:whiteListText = $txtWhitelist.Text
 
-    # Пересчитываем аппаратные маски ядер через ядро ОС с учетом состояния галочки SMT
+    # Пересчитываем аппаратные маски ядер через ядро ОС с учетом состояния галочки SMT (строго в $script:-области видимости)
     $recalcMasks = [WinAPI]::GetTopologyMasks($chkSMT.Checked)
-    $FullMask  = $recalcMasks[0]
-    $GameMask  = $recalcMasks[1]
-    $TrashMask = $recalcMasks[2]
-    $script:GameMask = $GameMask
+    $script:FullMask  = $recalcMasks[0]
+    $script:GameMask  = $recalcMasks[1]
+    $script:TrashMask = $recalcMasks[2]
 
     # Логируем предупреждение, если в системе активен kernel-античит (внешнее управление приоритетом/аффинити может с ними конфликтовать)
     $activeAC = Get-Service -Name "vgc", "vgk", "FACEITService", "FACEIT", "EasyAntiCheat", "EasyAntiCheat_EOS", "BEService" -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' }
@@ -15345,7 +15827,7 @@ if ($form -ne $null -and -not $form.IsDisposed) {
 
     Apply-Tweak "Генерация скрипта Eastrica Thread Director" { 
         # Удаляем старый кэш EastricaDirectorCore.dll, чтобы Thread Director перекомпилировал обновленный класс WinAPI
-        Remove-Item -LiteralPath "$OptimizerDir\EastricaDirectorCore.dll" -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "$OptimizerDir\EastricaDirectorCore_AffinityStatus.dll" -Force -ErrorAction SilentlyContinue
         Set-Content -Path $DirectorScriptPath -Value $DirectorCode -Encoding UTF8 -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 
     } # Записываем сгенерированный код Директора в файл на диск C:
 } else {
@@ -15589,11 +16071,21 @@ Write-Host "====================================================================
 Write-Host "РАЗДЕЛ 69: ЗАЩИТНИК WINDOWS, EDGE И ИСТОРИЯ АКТИВНОСТИ" -ForegroundColor Cyan
 Write-Host "==============================================================================" -ForegroundColor DarkGray
 
+$winDefendRunning = ((Get-Service -Name "WinDefend" -ErrorAction SilentlyContinue).Status -eq 'Running')
+$tamperVal69 = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features" -Name "TamperProtection" -ErrorAction SilentlyContinue).TamperProtection
+
 # Отключаем отправку образцов файлов в Microsoft и облачную защиту (Снижает сетевой инпут-лаг и пинг)
-Apply-Tweak "Отключение облачной защиты и телеметрии (MAPS) Защитника" { Set-MpPreference -SubmitSamplesConsent 2 -MAPSReporting 0 -DisablePrivacyMode $true *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # MAPSReporting 0 = Запрет телеметрии антивируса
+Apply-Tweak "Отключение облачной защиты и телеметрии (MAPS) Защитника" {
+    if (-not $winDefendRunning) { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+    if ($tamperVal69 -ne 4) { Stop-EastricaUnsupportedOperation "Заблокировано Tamper Protection" }
+    Set-MpPreference -SubmitSamplesConsent 2 -MAPSReporting 0 -DisablePrivacyMode $true *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+} # MAPSReporting 0 = Запрет телеметрии антивируса
 
 # Ограничение аппетитов Защитника в фоновом режиме
-Apply-Tweak "Ограничение сканера Защитника до 10% CPU" { Set-MpPreference -ScanAvgCPULoadFactor 10 *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 10 = Если фоновое сканирование всё же начнется, оно не сможет занять больше 10% мощности процессора (по умолчанию 50%)
+Apply-Tweak "Ограничение сканера Защитника до 10% CPU" {
+    if (-not $winDefendRunning) { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+    Set-MpPreference -ScanAvgCPULoadFactor 10 *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+} # 10 = Если фоновое сканирование всё же начнется, оно не сможет занять больше 10% мощности процессора (по умолчанию 50%)
 
 # Отключение Miracast (Освобождение Wi-Fi модуля и видеокарты от функции беспроводных дисплеев)
 Apply-Tweak "Отключение поддержки беспроводных дисплеев Miracast" { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "PlatformSupportMiracast" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключить поддержку Miracast
@@ -15670,7 +16162,35 @@ if ($global:OptTCP) {
 # Этот компонент Win11 агрессивно сканирует каждую запускаемую программу, сверяясь с облаком ИИ Microsoft.
 $SAC = "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy"
 if (!(Test-Path $SAC)) { Apply-Tweak "Создание раздела CI Policy (Smart App Control)" { New-Item $SAC -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-Apply-Tweak "Отключение оценки репутации Smart App Control" { Set-ItemProperty -Path $SAC -Name "VerifiedAndReputablePolicyState" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Отключить оценку репутации SAC
+Apply-Tweak "Отключение оценки репутации Smart App Control" {
+    Set-ItemProperty -Path $SAC -Name "VerifiedAndReputablePolicyState" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    $ciToolPath = "$env:SystemRoot\System32\CiTool.exe"
+    if (Test-Path -LiteralPath $ciToolPath) {
+        # --json отключает интерактивный запрос подтверждения в CiTool.exe; StandardInput закрывается сразу
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $ciToolPath
+        $psi.Arguments = "--refresh --json"
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $ciProc = [System.Diagnostics.Process]::Start($psi)
+        if ($ciProc) {
+            try {
+                $ciProc.StandardInput.Close()
+                $ciProc.BeginOutputReadLine()
+                $ciProc.BeginErrorReadLine()
+                if (-not $ciProc.WaitForExit(15000)) {
+                    try { $ciProc.Kill() } catch {}
+                }
+            } finally {
+                $ciProc.Dispose()
+            }
+        }
+        $global:LASTEXITCODE = 0
+    }
+} # 0 = Отключить оценку репутации SAC и обновить политику через CiTool
 
 # Управление классическим SmartScreen
 $SmartScreen = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
@@ -15881,43 +16401,44 @@ if (-not $global:IsOnline) {
             Write-Host "[OK] GoInterruptPolicy сохранен: $GipFile" -ForegroundColor Green
         }
 
-        # HIDUSBF (Утилита разгона мыши до 8000Hz)
-        # ВНИМАНИЕ: Для работы кастомного USB-драйвера в Win10/11 нужно выключить Secure Boot в BIOS.
-        Write-Host " ► Скачивание HIDUSBF (Разгон мыши до 8000Hz)..." -ForegroundColor DarkGray
-        Apply-Tweak "Скачивание архива HIDUSBF" { Download-File-Safe -Url "https://github.com/LordOfMice/hidusbf/raw/master/hidusbf.zip" -Output "$BaseDir\hidusbf.zip" }
-        if (Test-Path "$BaseDir\hidusbf.zip") {
-            $CI_Config = "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config"
-            if (!(Test-Path $CI_Config)) { Apply-Tweak "Создание раздела CI Config (HIDUSBF)" { New-Item $CI_Config -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-            if (-not $global:OptAntiCheat) {
-                # Если античит выключен — разрешаем драйверу HIDUSBF работать в системе
-                Apply-Tweak "Отключение блок-листа уязвимых драйверов (HIDUSBF)" { Set-ItemProperty -Path $CI_Config -Name "VulnerableDriverBlocklistEnable" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Отключаем блок-лист уязвимых драйверов
-                Apply-Tweak "Сброс тестового режима BCD" { 
-                    if ((cmd.exe /c "bcdedit /enum {current}") -match "\btestsigning\b") { cmd.exe /c "bcdedit /deletevalue {current} testsigning >nul 2>&1" }
-                    $global:LASTEXITCODE = 0
-                } # Сброс тестового режима
-                # Проверяем состояние Secure Boot: если он активен, nointegritychecks гарантированно вернет ошибку
-                $isSecureBoot = $false
-                try { $isSecureBoot = [bool](Confirm-SecureBootUEFI -ErrorAction SilentlyContinue) } catch {}
-                if (-not $isSecureBoot) {
-                    Apply-Tweak "Разрешение драйверов без цифровой подписи (nointegritychecks)" { bcdedit /set nointegritychecks on *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                } else {
-                    Write-Host " ► [ПРОПУСК] nointegritychecks пропущен: параметр заблокирован Secure Boot UEFI" -ForegroundColor DarkGray
-                }
-            } else {
-                # Если включен античит-режим (FACEIT/Vanguard), жестко возвращаем безопасность, иначе получите бан.
-                Apply-Tweak "Включение блок-листа уязвимых драйверов (Режим Античита)" { Set-ItemProperty -Path $CI_Config -Name "VulnerableDriverBlocklistEnable" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-                Apply-Tweak "Удаление тестового режима BCD (Режим Античита)" { 
-                    if ((cmd.exe /c "bcdedit /enum {current}") -match "\btestsigning\b") { cmd.exe /c "bcdedit /deletevalue {current} testsigning >nul 2>&1" }
-                    $global:LASTEXITCODE = 0
-                }
-                Apply-Tweak "Включение проверки цифровой подписи драйверов (Режим Античита)" { 
-                    if ((cmd.exe /c "bcdedit /enum {current}") -match "\bnointegritychecks\b") { cmd.exe /c "bcdedit /deletevalue {current} nointegritychecks >nul 2>&1" }
-                    $global:LASTEXITCODE = 0
-                }
+        # Проверка блок-листа драйверов и целостности подписи BCD выполняется независимо от скачивания HIDUSBF
+        $CI_Config = "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config"
+        if (!(Test-Path $CI_Config)) { Apply-Tweak "Создание раздела CI Config (HIDUSBF)" { New-Item $CI_Config -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
+        if (-not $global:OptAntiCheat) {
+            # Если античит выключен — разрешаем драйверу HIDUSBF работать в системе
+            Apply-Tweak "Отключение блок-листа уязвимых драйверов (HIDUSBF)" { Set-ItemProperty -Path $CI_Config -Name "VulnerableDriverBlocklistEnable" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            Apply-Tweak "Сброс тестового режима BCD" { 
+                if ((cmd.exe /c "bcdedit /enum {current}") -match "\btestsigning\b") { cmd.exe /c "bcdedit /deletevalue {current} testsigning >nul 2>&1" }
+                $global:LASTEXITCODE = 0
             }
-            Apply-Tweak "Распаковка архива HIDUSBF" { Expand-Archive -Path "$BaseDir\hidusbf.zip" -DestinationPath "$BaseDir\HIDUSBF" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Распаковываем
-            Apply-Tweak "Удаление архива HIDUSBF" { Remove-Item "$BaseDir\hidusbf.zip" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем архив
-            Write-Host "[OK] HIDUSBF помещен в папке $BaseDir\HIDUSBF" -ForegroundColor Green
+            $isSecureBoot = $false
+            try { $isSecureBoot = [bool](Confirm-SecureBootUEFI -ErrorAction SilentlyContinue) } catch {}
+            if (-not $isSecureBoot) {
+                Apply-Tweak "Разрешение драйверов без цифровой подписи (nointegritychecks)" { bcdedit /set nointegritychecks on *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            } else {
+                Write-Host " ► [ПРОПУСК] nointegritychecks пропущен: параметр заблокирован Secure Boot UEFI" -ForegroundColor DarkGray
+            }
+
+            # Скачивание и распаковка HIDUSBF только при выключенном режиме античита
+            Write-Host " ► Скачивание HIDUSBF (Разгон мыши до 8000Hz)..." -ForegroundColor DarkGray
+            Apply-Tweak "Скачивание архива HIDUSBF" { Download-File-Safe -Url "https://github.com/LordOfMice/hidusbf/raw/master/hidusbf.zip" -Output "$BaseDir\hidusbf.zip" }
+            if (Test-Path "$BaseDir\hidusbf.zip") {
+                Apply-Tweak "Распаковка архива HIDUSBF" { Expand-Archive -Path "$BaseDir\hidusbf.zip" -DestinationPath "$BaseDir\HIDUSBF" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                Apply-Tweak "Удаление архива HIDUSBF" { Remove-Item "$BaseDir\hidusbf.zip" -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+                Write-Host "[OK] HIDUSBF помещен в папке $BaseDir\HIDUSBF" -ForegroundColor Green
+            }
+        } else {
+            # В режиме античита восстанавливаем защиту подписи и не скачиваем неподписанный драйвер HIDUSBF
+            Apply-Tweak "Включение блок-листа уязвимых драйверов (Режим Античита)" { Set-ItemProperty -Path $CI_Config -Name "VulnerableDriverBlocklistEnable" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            Apply-Tweak "Удаление тестового режима BCD (Режим Античита)" { 
+                if ((cmd.exe /c "bcdedit /enum {current}") -match "\btestsigning\b") { cmd.exe /c "bcdedit /deletevalue {current} testsigning >nul 2>&1" }
+                $global:LASTEXITCODE = 0
+            }
+            Apply-Tweak "Включение проверки цифровой подписи драйверов (Режим Античита)" { 
+                if ((cmd.exe /c "bcdedit /enum {current}") -match "\bnointegritychecks\b") { cmd.exe /c "bcdedit /deletevalue {current} nointegritychecks >nul 2>&1" }
+                $global:LASTEXITCODE = 0
+            }
+            Write-Host " ► [ПРОПУСК] Скачивание HIDUSBF пропущено (Режим совместимости с Античитами)." -ForegroundColor DarkGray
         }
     }
 
@@ -15951,6 +16472,10 @@ if (-not $global:IsOnline) {
 
             Apply-Tweak "Удаление архива NVIDIA Profile Inspector" { Remove-Item $NPI_Zip -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
             
+            $NpiSysFree = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log).FreeSpace
+            # В современных драйверах NVIDIA стандартный размер кэша равен 16 ГБ (16384 МБ), поэтому не занижаем его до 10 ГБ при наличии свободного места
+            $NpiCacheMB = if ($null -ne $NpiSysFree -and $NpiSysFree -lt 50GB) { 1024 } else { 16384 }
+
             if ($global:OptAI) {
                 # ==============================================================================
                 # Профиль для ИИ, рендера и стриминга (Compute / Data Science)
@@ -16002,10 +16527,16 @@ if (-not $global:IsOnline) {
         <ValueType>Dword</ValueType>
       </ProfileSetting>
 
-      <!-- Low Latency Mode (277041152 / 0x10835000): 0 = Off (Максимальная пропускная способность очередей для генерации ИИ) -->
+      <!-- Low Latency Mode (277041152 / 0x10835000 + 390467 / 0x0005F543): 0 = Off (Максимальная пропускная способность очередей для генерации ИИ) -->
       <ProfileSetting>
         <SettingNameInfo>Low Latency Mode</SettingNameInfo>
         <SettingID>277041152</SettingID>
+        <SettingValue>0</SettingValue>
+        <ValueType>Dword</ValueType>
+      </ProfileSetting>
+      <ProfileSetting>
+        <SettingNameInfo>Low Latency Mode (CPL)</SettingNameInfo>
+        <SettingID>390467</SettingID>
         <SettingValue>0</SettingValue>
         <ValueType>Dword</ValueType>
       </ProfileSetting>
@@ -16018,11 +16549,11 @@ if (-not $global:IsOnline) {
         <ValueType>Dword</ValueType>
       </ProfileSetting>
 
-      <!-- Shader disk cache maximum size (11306135 / 0x00AC8497): 10240 = 10 GB в мегабайтах -->
+      <!-- Shader disk cache maximum size (11306135 / 0x00AC8497) в мегабайтах -->
       <ProfileSetting>
         <SettingNameInfo>Shader disk cache maximum size</SettingNameInfo>
         <SettingID>11306135</SettingID>
-        <SettingValue>10240</SettingValue>
+        <SettingValue>$NpiCacheMB</SettingValue>
         <ValueType>Dword</ValueType>
       </ProfileSetting>
 
@@ -16053,14 +16584,9 @@ if (-not $global:IsOnline) {
             } else {
                 # ==============================================================================
                 # Профиль для игр (Zero Input Lag / eSports)
+                # Отдельный профиль Eastrica Optimized Games для .exe из Steam/Epic не создаётся,
+                # чтобы не вызывать ошибку NVAPI_EXECUTABLE_ALREADY_IN_USE и не перетирать официальные профили NVIDIA
                 # ==============================================================================
-                $ExeStrings = ""
-                if ($global:NvGameExes) {
-                    foreach ($exe in $global:NvGameExes) {
-                        $ExeStrings += "        <string>$exe</string>`r`n"
-                    }
-                }
-
                 $NipContent = @"
 <?xml version="1.0" encoding="utf-16"?>
 <ArrayOfProfile>
@@ -16071,8 +16597,9 @@ if (-not $global:IsOnline) {
       <!-- Power Management (274197361): 5 = Optimal Power (Холодная видеокарта на рабочем столе) -->
       <ProfileSetting><SettingNameInfo>Power management mode</SettingNameInfo><SettingID>274197361</SettingID><SettingValue>5</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
       
-      <!-- Low Latency Mode (277041152): 1 = On (В паре с Max Pre-rendered Frames = 1 активирует режим Ultra Low Latency) -->
-      <ProfileSetting><SettingNameInfo>Low Latency Mode</SettingNameInfo><SettingID>277041152</SettingID><SettingValue>1</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
+      <!-- Low Latency Mode (277041152 + 390467): 0 = Off глобально (контроль отдан игре и NVIDIA Reflex для стабильного 1% Low FPS) -->
+      <ProfileSetting><SettingNameInfo>Low Latency Mode</SettingNameInfo><SettingID>277041152</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
+      <ProfileSetting><SettingNameInfo>Low Latency Mode (CPL)</SettingNameInfo><SettingID>390467</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
       
       <!-- CUDA - Force P2 State (1343646814): 0 = Off (Запрет сброса частот видеопамяти при активном NVENC/OBS/Reflex) -->
       <ProfileSetting><SettingNameInfo>CUDA - Force P2 State</SettingNameInfo><SettingID>1343646814</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
@@ -16086,21 +16613,21 @@ if (-not $global:IsOnline) {
       <!-- Multi-display acceleration (276495451 / 0x107AFC5B): 0 = Single Display Performance Mode -->
       <ProfileSetting><SettingNameInfo>Multi-display/mixed-GPU acceleration</SettingNameInfo><SettingID>276495451</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
       
-      <!-- Max Pre-rendered Frames (8102046 / 0x007BA09E): 1 (Минимальная очередь кадров CPU) -->
-      <ProfileSetting><SettingNameInfo>Maximum pre-rendered frames</SettingNameInfo><SettingID>8102046</SettingID><SettingValue>1</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
+      <!-- Max Pre-rendered Frames (8102046 / 0x007BA09E): 0 = Application Controlled (без жёсткого урезания до 1 кадра при упоре в CPU) -->
+      <ProfileSetting><SettingNameInfo>Maximum pre-rendered frames</SettingNameInfo><SettingID>8102046</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
       
-      <!-- Virtual Reality Pre-rendered Frames (269553971): 1 -->
-      <ProfileSetting><SettingNameInfo>Virtual Reality pre-rendered frames</SettingNameInfo><SettingID>269553971</SettingID><SettingValue>1</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
+      <!-- Virtual Reality Pre-rendered Frames (269553971): 0 = Use the 3D application setting -->
+      <ProfileSetting><SettingNameInfo>Virtual Reality pre-rendered frames</SettingNameInfo><SettingID>269553971</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
       
-      <!-- Texture Filtering - Quality (13510289 / 0x00CE2691): 20 (0x14) = High Performance -->
-      <ProfileSetting><SettingNameInfo>Texture filtering - Quality</SettingNameInfo><SettingID>13510289</SettingID><SettingValue>20</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
+      <!-- Texture Filtering - Quality (13510289 / 0x00CE2691): 0 = Quality (чистая картинка без мерцания текстур) -->
+      <ProfileSetting><SettingNameInfo>Texture filtering - Quality</SettingNameInfo><SettingID>13510289</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
       
       <!-- Texture Filtering - Negative LOD Bias (1686376 / 0x0019BB68): 1 = Clamp (Привязка) -->
       <ProfileSetting><SettingNameInfo>Texture filtering - Negative LOD bias</SettingNameInfo><SettingID>1686376</SettingID><SettingValue>1</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
       
-      <!-- Texture Filtering - Trilinear Optimization (3066610 = 0 [On]) & Anisotropic Sample Optimization (15151633 = 1 [On]) -->
-      <ProfileSetting><SettingNameInfo>Texture filtering - Trilinear optimization</SettingNameInfo><SettingID>3066610</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
-      <ProfileSetting><SettingNameInfo>Texture filtering - Anisotropic sample optimization</SettingNameInfo><SettingID>15151633</SettingID><SettingValue>1</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
+      <!-- Texture Filtering - Trilinear Optimization (3066610 = 1 [Off]) & Anisotropic Sample Optimization (15151633 = 0 [Off]) -->
+      <ProfileSetting><SettingNameInfo>Texture filtering - Trilinear optimization</SettingNameInfo><SettingID>3066610</SettingID><SettingValue>1</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
+      <ProfileSetting><SettingNameInfo>Texture filtering - Anisotropic sample optimization</SettingNameInfo><SettingID>15151633</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
       
       <!-- Threaded Optimization (549528094 / 0x20C1221E): 1 = On -->
       <ProfileSetting><SettingNameInfo>Threaded optimization</SettingNameInfo><SettingID>549528094</SettingID><SettingValue>1</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
@@ -16110,8 +16637,8 @@ if (-not $global:IsOnline) {
       <!-- Antialiasing - Gamma correction (276652957 / 0x107D639D): 0 = Off (Снижает нагрузку на GPU) -->
       <ProfileSetting><SettingNameInfo>Antialiasing - Gamma correction</SettingNameInfo><SettingID>276652957</SettingID><SettingValue>0</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
 
-      <!-- Shader disk cache maximum size (11306135 / 0x00AC8497): 10240 = 10 GB в мегабайтах -->
-      <ProfileSetting><SettingNameInfo>Shader disk cache maximum size</SettingNameInfo><SettingID>11306135</SettingID><SettingValue>10240</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
+      <!-- Shader disk cache maximum size (11306135 / 0x00AC8497) в мегабайтах -->
+      <ProfileSetting><SettingNameInfo>Shader disk cache maximum size</SettingNameInfo><SettingID>11306135</SettingID><SettingValue>$NpiCacheMB</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
 
       <!-- Vulkan/OpenGL present method (550932728 / 0x20D690F8): 1 = Prefer layered on DXGI Swapchain (Independent Flip для Vulkan) -->
       <ProfileSetting><SettingNameInfo>Vulkan/OpenGL present method</SettingNameInfo><SettingID>550932728</SettingID><SettingValue>1</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
@@ -16122,28 +16649,9 @@ if (-not $global:IsOnline) {
       <!-- Глобальное принудительное включение Resizable BAR (983226/983227/983295) убрано: в Base Profile оно вызывает утечки VRAM и просадки 1% Low в играх вне белого списка NVIDIA -->
     </Settings>
   </Profile>
-"@
-                # Если мы выбрали хотя бы одну игру, создаем для них отдельный профиль с Максимальной мощностью (без принудительного ограничения максимального FPS)
-                if ($ExeStrings -ne "") {
-                    $NipContent += @"
-  <Profile>
-    <ProfileName>Eastrica Optimized Games</ProfileName>
-    <Executeables>
-$ExeStrings    </Executeables>
-    <Settings>
-      <!-- ДЛЯ ИГР: Prefer Maximum Performance (Видеокарта не сбрасывает частоты в игре) -->
-      <ProfileSetting><SettingID>274197361</SettingID><SettingValue>1</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
-
-      <!-- Background Frame Rate (30 FPS при сворачивании Alt+Tab) -->
-      <ProfileSetting><SettingID>277041157</SettingID><SettingValue>30</SettingValue><ValueType>Dword</ValueType></ProfileSetting>
-    </Settings>
-  </Profile>
-"@
-                }
-                $NipContent += @"
 </ArrayOfProfile>
 "@
-                Write-Host "[NPI] Применен профиль: GAMING (Low Latency Mode, Optimal/MaxPerf, Shader Cache 10GB)" -ForegroundColor Cyan
+                Write-Host "[NPI] Применен профиль: GAMING (Low Latency Mode, Optimal Power, Shader Cache ${NpiCacheMB}MB)" -ForegroundColor Cyan
             }
             
             Apply-Tweak "Генерация файла профиля NPI (.nip)" { [System.IO.File]::WriteAllText($NipPath, $NipContent, [System.Text.Encoding]::Unicode) }
@@ -16180,8 +16688,9 @@ $ExeStrings    </Executeables>
         # Рабочая ссылка с CDN Guru3D / TechSpot с защитой от 403
         $MsiUrl = "https://files.guru3d.com/afterburner/MSIAfterburnerSetup465.zip"
         Apply-Tweak "Скачивание архива MSI Afterburner" { 
-            # Используем curl с эмуляцией реферера и браузера для обхода блокировки 403
-            cmd.exe /c "curl.exe -L -k -s -e `"https://www.guru3d.com/`" -A `"Mozilla/5.0 (Windows NT 10.0; Win64; x64)`" -o `"$MsiZip`" `"$MsiUrl`""
+            # Используем curl с эмуляцией реферера и браузера для обхода блокировки 403 (без -k, чтобы не отключать проверку TLS)
+            cmd.exe /c "curl.exe -L -s -f -e `"https://www.guru3d.com/`" -A `"Mozilla/5.0 (Windows NT 10.0; Win64; x64)`" -o `"$MsiZip`" `"$MsiUrl`""
+            $global:LASTEXITCODE = 0
             if (-not (Test-Path $MsiZip) -or (Get-Item $MsiZip).Length -lt 100000) {
                 # Запасной стабильный CDN
                 Download-File-Safe -Url "https://www.techpowerup.com/download/files/MSIAfterburnerSetup465.zip" -Output $MsiZip
@@ -16232,11 +16741,30 @@ $ExeStrings    </Executeables>
             Start-Sleep -Seconds 1
             $lassoConfigDir = "$env:APPDATA\ProcessLasso\config"
             if (-not (Test-Path $lassoConfigDir)) { New-Item -Path $lassoConfigDir -ItemType Directory -Force | Out-Null }
+
+            # Резервная копия существующих prolasso.ini в текущую папку бэкапа + добавление возврата в откат
+            $lassoBackupDir = "$BackupDir\ProcessLasso_Backup"
+            if (Test-Path -LiteralPath "$lassoConfigDir\prolasso.ini") {
+                if (-not (Test-Path -LiteralPath "$lassoBackupDir\config")) { New-Item -Path "$lassoBackupDir\config" -ItemType Directory -Force | Out-Null }
+                Copy-Item -LiteralPath "$lassoConfigDir\prolasso.ini" -Destination "$lassoBackupDir\config\prolasso.ini" -Force
+                $srcCfg = "$lassoBackupDir\config\prolasso.ini".Replace("'", "''")
+                $dstCfg = "$lassoConfigDir\prolasso.ini".Replace("'", "''")
+                [System.IO.File]::AppendAllText($global:ChangeHistoryPath, "Stop-Process -Name 'ProcessLasso','processgovernor' -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath '$srcCfg') { Copy-Item -LiteralPath '$srcCfg' -Destination '$dstCfg' -Force -ErrorAction SilentlyContinue }`r`n", [System.Text.Encoding]::UTF8)
+            }
+            if (Test-Path -LiteralPath "$env:APPDATA\ProcessLasso\prolasso.ini") {
+                if (-not (Test-Path -LiteralPath $lassoBackupDir)) { New-Item -Path $lassoBackupDir -ItemType Directory -Force | Out-Null }
+                Copy-Item -LiteralPath "$env:APPDATA\ProcessLasso\prolasso.ini" -Destination "$lassoBackupDir\prolasso.ini" -Force
+                $srcRoot = "$lassoBackupDir\prolasso.ini".Replace("'", "''")
+                $dstRoot = "$env:APPDATA\ProcessLasso\prolasso.ini".Replace("'", "''")
+                [System.IO.File]::AppendAllText($global:ChangeHistoryPath, "Stop-Process -Name 'ProcessLasso','processgovernor' -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath '$srcRoot') { Copy-Item -LiteralPath '$srcRoot' -Destination '$dstRoot' -Force -ErrorAction SilentlyContinue }`r`n", [System.Text.Encoding]::UTF8)
+            }
+
             $GameRuleList = if ($global:NvGameExes -and $global:NvGameExes.Count -gt 0) { ($global:NvGameExes | Select-Object -Unique) -join "," } else { "" }
             $probalanceConfig = @"
 [OutOfControlProcessRestraint]
-# OocOn=true: включает защитный алгоритм ProBalance против внезапного пожирания CPU фоновыми процессами (GamingMode остаётся false во избежание конфликта с Thread Director)
-OocOn=true
+# OocOn=false: ProBalance отключён во избежание лишнего фонового оверхеда и конкуренции с Thread Director (Process Lasso остаётся только для ручных правил Affinity)
+OocOn=false
+ProBalance=false
 ExcludeChildrenOfForeground=true
 ExcludeServices=true
 OocExclusions=audiodg.exe,dwm.exe,obs64.exe,vrserver.exe,vgc.exe,vgtray.exe,faceit.exe,faceitclient.exe,EasyAntiCheat.exe,EasyAntiCheat_EOS.exe,beservice.exe,rtss.exe
@@ -16360,8 +16888,14 @@ EnergySaverEnabled=false
                     # Для работы источника msstore в winget временно включаем службу PushToInstall (отключенную в Разделе 41)
                     Set-Service -Name "PushToInstall" -StartupType Manual -ErrorAction SilentlyContinue
                     Start-Service -Name "PushToInstall" -ErrorAction SilentlyContinue
-                    Apply-Tweak "Тихая установка Gaming Services через winget (msstore)" {
-                        Install-ViaWinget -AppId "9MWPM2CQNLHN" -Source "msstore"
+                    try {
+                        Apply-Tweak "Тихая установка Gaming Services через winget (msstore)" {
+                            Install-ViaWinget -AppId "9MWPM2CQNLHN" -Source "msstore"
+                        }
+                    } finally {
+                        # После завершения установки возвращаем службу PushToInstall в Disabled согласно Разделу 41
+                        Stop-Service -Name "PushToInstall" -Force -ErrorAction SilentlyContinue
+                        Set-Service -Name "PushToInstall" -StartupType Disabled -ErrorAction SilentlyContinue
                     }
                 } catch {
                     Apply-Tweak "Открытие страницы Gaming Services в MS Store (Резерв)" {
@@ -16393,11 +16927,11 @@ if (-not $global:OptAI) {
     # Очищаем глобальный __GL_SYNC_TO_VBLANK, чтобы не срывать G-Sync + VSync в OpenGL-приложениях и эмуляторах
     Apply-Tweak "Очистка глобальной блокировки OpenGL VSync (__GL_SYNC_TO_VBLANK)" { [Environment]::SetEnvironmentVariable("__GL_SYNC_TO_VBLANK", $null, "Machine") }
     
-    # Ультра-низкая очередь кадров OpenGL (аналог Max Pre-rendered frames = 1 для DX)
-    Apply-Tweak "Низкая очередь кадров OpenGL (__GL_MaxFramesAllowed)" { [Environment]::SetEnvironmentVariable("__GL_MaxFramesAllowed", "1", "Machine") }
+    # Очистка жёсткого лимита очереди кадров OpenGL (чтобы не просаживать 1% Low FPS в CPU-упоротых сценах и эмуляторах)
+    Apply-Tweak "Сброс жёсткой очереди кадров OpenGL (__GL_MaxFramesAllowed)" { [Environment]::SetEnvironmentVariable("__GL_MaxFramesAllowed", $null, "Machine") }
     
-    # Включение постоянного кэша состояний Vulkan (DXVK). Исключает фризы при повторном прохождении локации.
-    Apply-Tweak "Постоянный кэш состояний Vulkan DXVK (DXVK_STATE_CACHE)" { [Environment]::SetEnvironmentVariable("DXVK_STATE_CACHE", "1", "Machine") }
+    # Переменная совместимости со старыми версиями DXVK
+    Apply-Tweak "Запись DXVK_STATE_CACHE=1 для совместимости со старыми версиями DXVK" { [Environment]::SetEnvironmentVariable("DXVK_STATE_CACHE", "1", "Machine") }
     
     # Разрешение DXVK напрямую общаться с драйвером NVIDIA (Включает поддержку DLSS и Reflex в старых играх через Vulkan)
     Apply-Tweak "Поддержка NVAPI для DXVK (DXVK_ENABLE_NVAPI)" { [Environment]::SetEnvironmentVariable("DXVK_ENABLE_NVAPI", "1", "Machine") }
@@ -16406,25 +16940,30 @@ if (-not $global:OptAI) {
     Apply-Tweak "Отключение логов DXVK (DXVK_LOG_LEVEL=none)" { [Environment]::SetEnvironmentVariable("DXVK_LOG_LEVEL", "none", "Machine") }
     
     # Автоматическое определение объема кэша шейдеров на основе свободного места диска C:
+    # Драйвер NVIDIA принимает __GL_SHADER_DISK_CACHE_SIZE строго в БАЙТАХ (значение 10240 ограничивало кэш до 10 КБ!)
     $SysDriveFreeSpace = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log).FreeSpace
     if ($null -ne $SysDriveFreeSpace -and $SysDriveFreeSpace -lt 50GB) {
-        $ShaderCacheValue = "1024" # 1 ГБ для забитых дисков (< 50 ГБ свободно)
+        $ShaderCacheBytes = "1073741824" # 1 ГБ в байтах для забитых дисков (< 50 ГБ свободно)
+        $ShaderCacheLabel = "1 GB"
         Write-Host " ► Места на диске C: < 50 ГБ. Кэш шейдеров установлен на 1 ГБ." -ForegroundColor Yellow
     } else {
-        $ShaderCacheValue = "10240" # 10 ГБ для нормальных дисков
+        $ShaderCacheBytes = "10737418240" # 10 ГБ в байтах для нормальных дисков
+        $ShaderCacheLabel = "10 GB"
         Write-Host " ► Места на диске достаточно. Кэш шейдеров установлен на 10 ГБ." -ForegroundColor DarkGray
     }
 
     # Установка кэша шейдеров NVIDIA
     Apply-Tweak "Включение кэша шейдеров NVIDIA (__GL_SHADER_DISK_CACHE)" { [Environment]::SetEnvironmentVariable("__GL_SHADER_DISK_CACHE", "1", "Machine") }
-    Apply-Tweak "Установка размера кэша шейдеров NVIDIA ($ShaderCacheValue MB)" { [Environment]::SetEnvironmentVariable("__GL_SHADER_DISK_CACHE_SIZE", $ShaderCacheValue, "Machine") }
+    Apply-Tweak "Установка размера кэша шейдеров NVIDIA ($ShaderCacheLabel)" { [Environment]::SetEnvironmentVariable("__GL_SHADER_DISK_CACHE_SIZE", $ShaderCacheBytes, "Machine") }
     
     # Разрешает драйверу удалять старые шейдеры при обновлении драйвера (Очистка от мусора)
     Apply-Tweak "Разрешение очистки старых шейдеров NVIDIA" { [Environment]::SetEnvironmentVariable("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "0", "Machine") }
     
-    # Установка кэша DirectX
-    Apply-Tweak "Разрешение удаления старого кэша D3D" { [Environment]::SetEnvironmentVariable("D3D_DISABLE_SHADER_CACHE_DELETION", $null, "Machine") }
-    Apply-Tweak "Установка размера кэша D3D ($ShaderCacheValue MB)" { [Environment]::SetEnvironmentVariable("D3D_SHADER_CACHE_SIZE", $ShaderCacheValue, "Machine") }
+    # Очистка невалидных переменных кэша D3D (размер кэша DirectX управляется драйвером и настройкой NPI 11306135)
+    Apply-Tweak "Очистка невалидных переменных кэша D3D" {
+        [Environment]::SetEnvironmentVariable("D3D_DISABLE_SHADER_CACHE_DELETION", $null, "Machine")
+        [Environment]::SetEnvironmentVariable("D3D_SHADER_CACHE_SIZE", $null, "Machine")
+    }
     
     # Очистка несуществующих политик DisableAutoSR и DisableDirectSRTelemetry из Windows\Graphics
     $GraphicsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Graphics"
@@ -16475,8 +17014,8 @@ if (-not $global:OptAI) {
         [Environment]::SetEnvironmentVariable("DISABLE_GTS_ASYNC_COMPUTE", $null, "Machine")
     } 
     
-    # Запрещает вычислительным потокам засыпать в ожидании данных
-    Apply-Tweak "Запрет вычислительным потокам KMP засыпать (KMP_BLOCKTIME=0)" { [Environment]::SetEnvironmentVariable("KMP_BLOCKTIME", "0", "Machine") }
+    # Intel OpenMP: 0 мс активного ожидания после параллельного участка. Влияет на приложения, использующие совместимую среду выполнения OpenMP.
+    Apply-Tweak "Intel OpenMP: активное ожидание перед сном — 0 мс" { [Environment]::SetEnvironmentVariable("KMP_BLOCKTIME", "0", "Machine") }
 
     # Очистка нерабочих глобальных переменных среды Unity (движок Unity игнорирует такие env vars в билдах игр)
     Apply-Tweak "Очистка невалидных переменных среды Unity" {
@@ -16509,8 +17048,8 @@ if (-not $global:OptAI) {
     }
 }
 
-# Принудительное включение вычислений формата TF32 для видеокарт NVIDIA. Ускоряет генерацию DLSS-кадров на ~30%.
-Apply-Tweak "Включение формата TF32 для NVIDIA (Ускорение DLSS)" { [Environment]::SetEnvironmentVariable("NVIDIA_TF32_OVERRIDE", "1", "Machine") }
+# Очистка некорректного значения NVIDIA_TF32_OVERRIDE (официально принимает только "0" для отключения TF32 в CUDA и на DLSS не влияет)
+Apply-Tweak "Очистка некорректной переменной NVIDIA_TF32_OVERRIDE" { [Environment]::SetEnvironmentVariable("NVIDIA_TF32_OVERRIDE", $null, "Machine") }
 
 # Очищаем системный NODE_OPTIONS на уровне Machine во избежание краха сред разработки Node.js, Vite и VS Code
 Apply-Tweak "Очистка системной переменной NODE_OPTIONS (Защита сборок Node.js)" { [Environment]::SetEnvironmentVariable("NODE_OPTIONS", $null, "Machine") }
@@ -16711,26 +17250,59 @@ Write-Host "====================================================================
 Write-Host "РАЗДЕЛ 77: ЗАЩИТНИК WINDOWS (АППАРАТНАЯ ИЗОЛЯЦИЯ) И AMSI" -ForegroundColor Cyan
 Write-Host "==============================================================================" -ForegroundColor DarkGray
 
+$winDefendRunning77 = ((Get-Service -Name "WinDefend" -ErrorAction SilentlyContinue).Status -eq 'Running')
+$wdFilterRunning77 = ((Get-Service -Name "WdFilter" -ErrorAction SilentlyContinue).Status -eq 'Running')
+$tamper = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features" -Name "TamperProtection" -ErrorAction SilentlyContinue).TamperProtection
+$isTamperProtected77 = ($tamper -ne 4)
+if ($winDefendRunning77) {
+    try {
+        $mpComp77 = Get-MpComputerStatus -ErrorAction SilentlyContinue
+        if ($null -ne $mpComp77 -and $mpComp77.IsTamperProtected) { $isTamperProtected77 = $true }
+    } catch {}
+}
+
 if ($global:OptDefender) {
     Write-Host "[WARNING] Чтобы инспекция Защитника отключилась, у вас должна быть ВЫКЛЮЧЕНА" -ForegroundColor DarkGray
     Write-Host "'Защита от подделки' (Tamper Protection) в настройках безопасности Windows!" -ForegroundColor DarkGray
-    try {
-        # Отключаем мониторинг поведения, проверку файлов на лету, сканирование скриптов и архивов
-        Apply-Tweak "Отключение модулей проверки Защитника Windows" { Set-MpPreference -DisableBehaviorMonitoring $true -DisableIOAVProtection $true -DisableScriptScanning $true -DisableArchiveScanning $true *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-    } catch { Write-Warning "Ошибка при выполнении: $($_.Exception.Message)" }
+    # Заранее проверяем службу WinDefend и TamperProtection, чтобы избежать ложного [FAIL] и exit 1 в -Unattended
+    Apply-Tweak "Отключение модулей проверки Защитника Windows" {
+        if (-not $winDefendRunning77) { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+        if ($isTamperProtected77) { Stop-EastricaUnsupportedOperation "Заблокировано Tamper Protection" }
+        # В режиме совместимости с античитами не отключаем AMSI-сканирование скриптов (DisableScriptScanning = $false)
+        Set-MpPreference -DisableBehaviorMonitoring $true -DisableIOAVProtection $true -DisableScriptScanning (-not $global:OptAntiCheat) -DisableArchiveScanning $true *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+        # Штатное отключение Network Inspection System (WdNisSvc/WdNisDrv) через API Defender
+        try {
+            $setMpCmd = Get-Command Set-MpPreference -ErrorAction SilentlyContinue
+            if ($setMpCmd -and $setMpCmd.Parameters.ContainsKey('DisableIntrusionPreventionSystem')) {
+                Set-MpPreference -DisableIntrusionPreventionSystem $true -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+            }
+        } catch {}
+    }
 
     if (Get-Service -Name "WdNisSvc" -ErrorAction SilentlyContinue) {
-        $tamper = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features" -Name "TamperProtection" -ErrorAction SilentlyContinue).TamperProtection
-        if ($tamper -eq 4) {
+        if (-not $isTamperProtected77) {
             # Защита от подделки выключена — остановка разрешена
             Apply-Tweak "Остановка службы инспекции сети Защитника (WdNisSvc)" { 
                 cmd.exe /c "sc.exe stop WdNisSvc >nul 2>&1"
                 $global:LASTEXITCODE = 0
             }
+            $wdNisSvcPath = "HKLM:\SYSTEM\CurrentControlSet\Services\WdNisSvc"
             Apply-Tweak "Отключение службы инспекции сети Защитника (WdNisSvc)" { 
-                Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WdNisSvc" -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
-                cmd.exe /c "sc.exe config WdNisSvc start= disabled >nul 2>&1"
-                $global:LASTEXITCODE = 0
+                Grant-RegPermission -RegPath $wdNisSvcPath
+                try {
+                    try {
+                        Set-ItemProperty -Path $wdNisSvcPath -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                    } catch {
+                        if ($wdFilterRunning77 -and ($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [System.Security.SecurityException])) {
+                            Stop-EastricaUnsupportedOperation "Заблокировано активным драйвером ядра WdFilter.sys"
+                        }
+                        throw
+                    }
+                    cmd.exe /c "sc.exe config WdNisSvc start= disabled >nul 2>&1"
+                    $global:LASTEXITCODE = 0
+                } finally {
+                    Restore-RegPermission -RegPath $wdNisSvcPath
+                }
             }
         } else {
             Write-Host " ► [Пропуск] WdNisSvc защищена от остановки (Включена защита от подделки Tamper Protection)." -ForegroundColor DarkGray
@@ -16742,15 +17314,36 @@ if ($global:OptDefender) {
     foreach ($drv in $WdDrivers) {
         $DrvPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$drv"
         if (Test-Path $DrvPath) {
-            Apply-Tweak "Отключение сетевой инспекции трафика Защитника ($drv)" { Set-ItemProperty -Path $DrvPath -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
+            Apply-Tweak "Отключение сетевой инспекции трафика Защитника ($drv)" {
+                if ($isTamperProtected77) { Stop-EastricaUnsupportedOperation "Заблокировано Tamper Protection" }
+                Grant-RegPermission -RegPath $DrvPath
+                try {
+                    try {
+                        Set-ItemProperty -Path $DrvPath -Name "Start" -Value 4 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                    } catch {
+                        if ($wdFilterRunning77 -and ($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [System.Security.SecurityException])) {
+                            Stop-EastricaUnsupportedOperation "Заблокировано активным драйвером ядра WdFilter.sys"
+                        }
+                        throw
+                    }
+                } finally {
+                    Restore-RegPermission -RegPath $DrvPath
+                }
+            }
         }
     }
 
     # Удушаем главный движок сканирования Защитника (MsMpEng.exe), чтобы он не мог забрать мощность CPU у игры
     $DefenderPerf = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\MsMpEng.exe\PerfOptions"
     if (!(Test-Path $DefenderPerf)) { Apply-Tweak "Создание профиля IFEO для движка Защитника (MsMpEng.exe)" { New-Item $DefenderPerf -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
-    Apply-Tweak "Низший приоритет CPU для сканера Защитника" { Set-ItemProperty -Path $DefenderPerf -Name "CpuPriorityClass" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 1 = Idle Priority (Низший)
-    Apply-Tweak "Низший приоритет I/O для сканера Защитника" { Set-ItemProperty -Path $DefenderPerf -Name "IoPriority" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Низший приоритет чтения диска
+    Apply-Tweak "Низший приоритет CPU для сканера Защитника" {
+        if ($isTamperProtected77) { Stop-EastricaUnsupportedOperation "Заблокировано Tamper Protection" }
+        Set-ItemProperty -Path $DefenderPerf -Name "CpuPriorityClass" -Value 1 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    } # 1 = Idle Priority (Низший)
+    Apply-Tweak "Низший приоритет I/O для сканера Защитника" {
+        if ($isTamperProtected77) { Stop-EastricaUnsupportedOperation "Заблокировано Tamper Protection" }
+        Set-ItemProperty -Path $DefenderPerf -Name "IoPriority" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+    } # 0 = Низший приоритет чтения диска
 
     # Скрытие иконки "Безопасность Windows" из системного трея (рядом с часами)
     $SecuritySystray = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Systray"
@@ -16771,9 +17364,17 @@ if ($global:OptDefender) {
     if ($hasThirdPartyAV) {
         Write-Host " ► Обнаружен сторонний антивирус. Включение служб Windows Defender пропущено." -ForegroundColor DarkGray
     } else {
-        try {
-            Apply-Tweak "Восстановление модулей проверки Защитника Windows" { Set-MpPreference -DisableBehaviorMonitoring $false -DisableIOAVProtection $false -DisableScriptScanning $false -DisableArchiveScanning $false *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
-        } catch { Write-Warning "Ошибка при выполнении: $($_.Exception.Message)" }
+        Apply-Tweak "Восстановление модулей проверки Защитника Windows" {
+            if (-not $winDefendRunning77) { Stop-EastricaUnsupportedOperation "Служба Windows Defender не активна" }
+            if ($isTamperProtected77) { Stop-EastricaUnsupportedOperation "Заблокировано Tamper Protection" }
+            Set-MpPreference -DisableBehaviorMonitoring $false -DisableIOAVProtection $false -DisableScriptScanning $false -DisableArchiveScanning $false *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+            try {
+                $setMpCmd = Get-Command Set-MpPreference -ErrorAction SilentlyContinue
+                if ($setMpCmd -and $setMpCmd.Parameters.ContainsKey('DisableIntrusionPreventionSystem')) {
+                    Set-MpPreference -DisableIntrusionPreventionSystem $false -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                }
+            } catch {}
+        }
 
         if (Get-Service -Name "WdNisSvc" -ErrorAction SilentlyContinue 2>> $env:SystemDrive\EastricaTools\Eastrica_ErrorTrace.log) {
             Apply-Tweak "Включение службы инспекции сети Защитника (WdNisSvc)" { Set-Service -Name "WdNisSvc" -StartupType Automatic *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
@@ -16783,7 +17384,25 @@ if ($global:OptDefender) {
         $WdDrivers = @("WdNisDrv")
         foreach ($drv in $WdDrivers) {
             $DrvPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$drv"
-            if (Test-Path $DrvPath) { Apply-Tweak "Восстановление сетевой инспекции трафика Защитника ($drv)" { Set-ItemProperty -Path $DrvPath -Name "Start" -Value 2 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } }
+            if (Test-Path $DrvPath) {
+                Apply-Tweak "Восстановление сетевой инспекции трафика Защитника ($drv)" {
+                    if ($isTamperProtected77) { Stop-EastricaUnsupportedOperation "Заблокировано Tamper Protection" }
+                    Grant-RegPermission -RegPath $DrvPath
+                    try {
+                        try {
+                            # Штатный Start для WdNisDrv — 3 (Manual)
+                            Set-ItemProperty -Path $DrvPath -Name "Start" -Value 3 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8
+                        } catch {
+                            if ($wdFilterRunning77 -and ($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [System.Security.SecurityException])) {
+                                Stop-EastricaUnsupportedOperation "Заблокировано активным драйвером ядра WdFilter.sys"
+                            }
+                            throw
+                        }
+                    } finally {
+                        Restore-RegPermission -RegPath $DrvPath
+                    }
+                }
+            }
         }
 
         Apply-Tweak "Удаление ограничений IFEO для сканера Защитника" {
@@ -16813,17 +17432,10 @@ if (Test-Path "$env:SystemRoot\System32\drivers\WdFilter.sys") {
     Write-Host " ► [ПРОПУСК] Драйвер WdFilter.sys удален из ОС. Твик пропущен во избежание BSOD." -ForegroundColor DarkGray
 }
 
-# Полное отключение AMSI (Antimalware Scan Interface)
-$AmsiKey = "HKLM:\SOFTWARE\Microsoft\AMSI\Providers"
-if (-not $global:OptAntiCheat) {
-    if (Test-Path $AmsiKey) {
-        Apply-Tweak "Блокировка интеграции провайдера AMSI" { Set-ItemProperty -Path "$AmsiKey\{2781761E-28E0-4109-99FE-B9D127C57AFE}" -Name "AMSI" -Value 0 -Type DWord -Force *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # 0 = Блокируем интеграцию провайдера Microsoft
-    }
-} else {
-    # Античиты могут кикнуть, если увидят, что интерфейс антивируса (AMSI) выключен
-    if (Test-Path $AmsiKey) {
-        Apply-Tweak "Удаление блокировки AMSI (Режим Античита)" { Remove-ItemProperty -Path "$AmsiKey\{2781761E-28E0-4109-99FE-B9D127C57AFE}" -Name "AMSI" *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 } # Удаляем твик
-    }
+# Очистка невалидного параметра AMSI = 0 (провайдер MpOav.dll управляется через DisableScriptScanning, а не через значение AMSI)
+$AmsiKey = "HKLM:\SOFTWARE\Microsoft\AMSI\Providers\{2781761E-28E0-4109-99FE-B9D127C57AFE}"
+if (Test-Path $AmsiKey) {
+    Apply-Tweak "Очистка невалидного параметра AMSI из провайдера Defender" { Remove-ItemProperty -Path $AmsiKey -Name "AMSI" -Force -ErrorAction SilentlyContinue *>&1 | Out-File -FilePath $global:LogPath -Append -Encoding UTF8 }
 }
 
 Write-Host ""
@@ -17749,9 +18361,8 @@ $ManualGuideContent = @"
 =================================================================================================================
  ДОПОЛНИТЕЛЬНЫЕ ДЕЙСТВИЯ (ОБЯЗАТЕЛЬНО):
    1. Если у вас Intel 12/13/14 Gen, Core Ultra или Ryzen 7900X3D/7950X3D/9950X3D:
-      В Process Lasso активна защита ProBalance (OocOn=true) для сдерживания фоновых пожирателей CPU
-      (при этом GamingMode в Process Lasso выключен, чтобы не конфликтовать с Eastrica Thread Director).
-      При желании вы можете жестко закрепить нужную игру за P-Cores / CCD0 через Process Lasso.
+      ProBalance (OocOn=false) и GamingMode в Process Lasso отключены, чтобы не конкурировать с Eastrica Thread Director
+      (Process Lasso оставлен для ручного закрепления процессов, при желании вы можете закрепить нужную игру за P-Cores / CCD0).
       Если на обычном CPU удалялся Game Bar, скрипт автоматически создал заглушку ms-gamingoverlay без всплывающих окон.
    2. MSI Mode (GoInterruptPolicy):
       - Скрипт уже включил MSI через реестр.
@@ -18239,7 +18850,8 @@ $ManualGuideContent = @"
  НЕЙРОСЕТИ: НАСТРОЙКА РЕЗЕРВИРОВАНИЯ VRAM В ОЗУ (CUDA SYSMEM FALLBACK):
    Поведение драйвера NVIDIA при нехватке физической видеопамяти:
    1. Что настроил скрипт:
-      - В разделах 19 и 73 скрипт форсировал [CUDA Sysmem Fallback = Prefer Sysmem Fallback (1)].
+      - В разделе 19 включен системный флаг драйвера [EnableSysmemFallback = 1], а в разделе 73
+        (при активном режиме ИИ) в профиль NPI добавлен параметр [CUDA Sysmem Fallback = Prefer Sysmem Fallback (1)].
       - Это защитный стандарт для большинства пользовательских видеокарт с объемом 8–12 ГБ VRAM:
         при переполнении видеопамяти тяжелый скрипт (например, ComfyUI FLUX или SDXL с контролнетами)
         НЕ вылетает на рабочий стол с аварийной фатальной ошибкой CUDA Out of Memory (OOM),
@@ -18325,8 +18937,9 @@ $ManualGuideContent = @"
     - Исправлен Win32PrioritySeparation: нормализован до 38 (0x26 Hex — Short, Variable, High Foreground Boost 3:1).
     - Очищены жесткие лимиты пулов памяти x86: SystemPages, PoolUsageMaximum, NonPagedPoolSize, PagedPoolSize.
     - Сброшен LargeSystemCache = 1 (на игровых ПК этот серверный параметр отбирал ОЗУ под дисковый кэш, вызывая фризы).
-    - Удалены прочие невалидные ключи-пустышки (ForceParkingRequested, RTWorkQ, DirectDraw, Rpc\UseNagle, EnableDCA/TCPA/NetDMA),
-      исправлены ConvertibleSlateMode = 1 (режим ПК), MaxCachedIcons = 8192 и RawMouseThrottleEnabled = 1 (защита от фоновых лагов мыши).
+    - Удалены прочие невалидные ключи-пустышки (ForceParkingRequested, RTWorkQ, DirectDraw, Rpc\UseNagle,
+      EnableDCA/TCPA/NetDMA), исправлены ConvertibleSlateMode = 1 (режим ПК), MaxCachedIcons = 8192 и
+      RawMouseThrottleEnabled = 0 (отключение системного троттлинга Raw Input мыши).
 
  3. ПЕРИФЕРИЯ, НАКОПИТЕЛИ И МОДУЛИ WINDOWS 11 (24H2–26H2):
     - Настроены емкости буферов ввода (MouseDataQueueSize = 200 с запасом под мыши 4K–8K Hz, KeyboardDataQueueSize = 150).
